@@ -60,7 +60,7 @@ def _make_q_forbidden_penalty(Q, q_orig, forbidden_components,
 
     forbidden_components: {component_index: penalty_multiplier}
     Penalty is added to q-vector entries corresponding to given component
-    indices. For B1: directly to q[i]. For B2/3bit/4bit: penalty spread across
+    indices. For B1: directly to q[i]. For B2/B3/B4: penalty spread across
     all bits of that component.
     """
     q_mod = q_orig.copy()
@@ -77,11 +77,17 @@ def _make_q_forbidden_penalty(Q, q_orig, forbidden_components,
                 qi = var_map["idx_q"](comp_idx, b)
                 if qi < len(q_mod):
                     q_mod[qi] += penalty * 0.3
-        elif encoding in ("3bit", "4bit"):
+        elif encoding in ("B3", "B4"):
             idx_fn = var_map["idx"]
             vpc = var_map["vars_per_component"]
             for b in range(vpc):
                 qi = idx_fn(comp_idx, b)
+                if qi < len(q_mod):
+                    q_mod[qi] += penalty * 0.3
+        elif encoding.startswith("linked_"):
+            B = var_map["B"]
+            for b in range(B):
+                qi = var_map["idx_q"](comp_idx, b)
                 if qi < len(q_mod):
                     q_mod[qi] += penalty * 0.3
 

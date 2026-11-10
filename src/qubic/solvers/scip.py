@@ -48,7 +48,11 @@ def _solve_one_scip(Q, q, var_map, k_max, time_limit, prev_solutions):
         idx_s = var_map["idx_s"]
         for j in range(N):
             m.addCons(z[j] == x[idx_s(j)], f"sel_B2_{j}")
-    elif scheme in ("3bit", "4bit"):
+    elif scheme.startswith("linked_"):
+        idx_s = var_map["idx_s"]
+        for j in range(N):
+            m.addCons(z[j] == x[idx_s(j)], f"sel_linked_{j}")
+    elif scheme in ("B3", "B4"):
         vpc = var_map["vars_per_component"]
         idx_fn = var_map["idx"]
         for j in range(N):
@@ -59,7 +63,7 @@ def _solve_one_scip(Q, q, var_map, k_max, time_limit, prev_solutions):
     else:
         raise ValueError(
             f"solve_scip: unsupported scheme {scheme!r}; "
-            "expected 'B1', 'B2', '3bit' or '4bit'"
+            "expected 'B1', 'B2', 'B3' or 'B4'"
         )
 
     # Cardinality constraint

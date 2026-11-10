@@ -176,7 +176,7 @@ def tryallmixtures(reference_spectra, target, componentCount=None,
     top_k_values, k_max, time_limit, max_solutions, threshold_frac :
         forwarded to :func:`qubic.pipeline.run_pipeline`.
     randomSeed : int (pyfitit spelling), folder : ignored (signature compat).
-    **qubo_kwargs : extra encoding options (lam_sparse, lam_link, lam_rub, k).
+    **qubo_kwargs : extra encoding options (lam_sparse, lam_link, lam_antimix, k).
 
     Returns
     -------

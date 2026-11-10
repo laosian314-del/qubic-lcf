@@ -69,6 +69,15 @@ def _solve_standard(Q, q, var_map, k_max, time_limit, msg, prev_solutions,
         idx_s = var_map["idx_s"]
         for j in range(N):
             prob += z[j] == x[idx_s(j)]
+    elif scheme.startswith("linked_"):
+        idx_s = var_map["idx_s"]
+        for j in range(N):
+            prob += z[j] == x[idx_s(j)]
+    else:
+        raise ValueError(
+            f"solve_qubo_milp: unsupported scheme {scheme!r}; "
+            "expected 'B1', 'B2', 'B3', 'B4' or 'linked_B{2,3,4}'"
+        )
 
     prob += pulp.lpSum(z) <= k_max, "card"
 
@@ -100,10 +109,10 @@ def _solve_standard(Q, q, var_map, k_max, time_limit, msg, prev_solutions,
     return (sample, pulp.value(prob.objective)), t
 
 
-def _solve_3bit_optimized(Q, q, var_map, k_max, time_limit, msg, prev_solutions,
-                          solver_backend="auto"):
+def _solve_antimix_optimized(Q, q, var_map, k_max, time_limit, msg, prev_solutions,
+                             solver_backend="auto"):
     """
-    Optimized MILP for 3-bit/4-bit Rubtsov (ported unchanged).
+    Optimized MILP for the 3-bit / 4-bit anti-mixing encodings (ported unchanged).
 
     Decomposes QUBO into:
     1. Diagonal (linear in binary)
@@ -121,7 +130,7 @@ def _solve_3bit_optimized(Q, q, var_map, k_max, time_limit, msg, prev_solutions,
     idx_fn = var_map["idx"]
     vpc = var_map["vars_per_component"]
 
-    prob = pulp.LpProblem("QUBO_3bit", pulp.LpMinimize)
+    prob = pulp.LpProblem("QUBO_antimix", pulp.LpMinimize)
 
     # Binary variables
     x = [pulp.LpVariable(f"x{i}", cat="Binary") for i in range(M)]
@@ -146,7 +155,7 @@ def _solve_3bit_optimized(Q, q, var_map, k_max, time_limit, msg, prev_solutions,
 
     # --- Extract parameters from Q ---
     # Cross-component G: Q[idx(j1,0), idx(j2,0)] = alpha[0]^2*G[j1,j2] + lam_sparse (j1!=j2)
-    # Within-component: Q[idx(j,0), idx(j,1)] = alpha[0]*alpha[1]*G[j,j] - lam_rub/2
+    # Within-component: Q[idx(j,0), idx(j,1)] = alpha[0]*alpha[1]*G[j,j] - lam_antimix/2
     G_off = np.zeros((N, N))
     for j1 in range(N):
         for j2 in range(j1 + 1, N):
@@ -156,15 +165,15 @@ def _solve_3bit_optimized(Q, q, var_map, k_max, time_limit, msg, prev_solutions,
     a01 = alpha[0] * alpha[1]
     a02 = alpha[0] * alpha[2] if vpc >= 3 else 0
     G_diag = np.zeros(N)
-    lam_rub_vals = []
+    lam_antimix_vals = []
     for j in range(N):
         Q01 = Q[idx_fn(j, 0), idx_fn(j, 1)]
         Q02 = Q[idx_fn(j, 0), idx_fn(j, 2)] if vpc >= 3 else Q01
         if abs(a01 - a02) > 1e-10:
             G_diag[j] = (Q01 - Q02) / (a01 - a02)
         lr = 2 * (a01 * G_diag[j] - Q01)
-        lam_rub_vals.append(lr)
-    lam_rub = np.mean(lam_rub_vals)
+        lam_antimix_vals.append(lr)
+    lam_antimix = np.mean(lam_antimix_vals)
 
     # Extract lam_sparse from cross-component sparsity
     lam_sparse = Q[idx_fn(0, 0), idx_fn(1, 0)] - alpha[0] ** 2 * G_off[0, 1]
@@ -199,7 +208,7 @@ def _solve_3bit_optimized(Q, q, var_map, k_max, time_limit, msg, prev_solutions,
                 prob += wvar >= x[idx_fn(j, b1)] + x[idx_fn(j, b2)] - 1
                 obj += coeff * wvar
 
-    # --- Rubtsov penalty bilinears ---
+    # --- Anti-mixing penalty bilinears ---
     for j in range(N):
         for b1 in range(vpc):
             for b2 in range(b1 + 1, vpc):
@@ -252,9 +261,9 @@ def solve_qubo_milp(Q, q, var_map, k_max=15, time_limit=None,
     or ``None`` if no feasible solution was found.
     """
     scheme = var_map["scheme"]
-    if scheme in ("3bit", "4bit"):
-        return _solve_3bit_optimized(Q, q, var_map, k_max, time_limit,
-                                     msg, prev_solutions, solver_backend)
+    if scheme in ("B3", "B4"):
+        return _solve_antimix_optimized(Q, q, var_map, k_max, time_limit,
+                                        msg, prev_solutions, solver_backend)
     else:
         return _solve_standard(Q, q, var_map, k_max, time_limit,
                                msg, prev_solutions, prune_threshold,

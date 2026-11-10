@@ -1,17 +1,24 @@
-"""Encoding-free classical baselines for LCF component identification.
+"""Alternative backend for LCF component identification (encoding-free).
 
-Ported from the QUBO_LCF research repository
-(``scripts/baseline_classics.py`` and ``scripts/oracle_exact.py``) as a clean
-library module: no ``main()``, no absolute paths, no CLI hardcoding.  All
-numerical semantics (candidate generation, post-processing, BIC) are kept.
+QUBIC-LCF offers two backends for identifying mixture components: the QUBO
+pipeline (see :mod:`qubic.pipeline` and :class:`qubic.Problem`) and this
+**alternative backend** — encoding-free classical methods used for
+comparison (they are called baselines only in the paper). Ported from the
+QUBO_LCF research repository (``scripts/baseline_classics.py`` and
+``scripts/oracle_exact.py``) as a clean library module: no ``main()``, no
+absolute paths, no CLI hardcoding.  All numerical semantics (candidate
+generation, post-processing, BIC) are kept.
 
-Methods (each returns the same result dict)
--------------------------------------------
+Methods (each returns the same :class:`AlternativeResult` dict)
+--------------------------------------------------------------
+Greedy forward selection (MP/OMP) family:
 - ``omp_bic``        -- sklearn ``OrthogonalMatchingPursuit`` with
    ``n_nonzero_coefs=k`` for k = 1..k_max -> min-BIC.
 - ``mp_bic``         -- Matching Pursuit without orthogonalization: at step t
    pick the column maximizing |<r, a_j>|/||a_j||, update
    r <- r - (<r,a_j>/||a_j||^2) a_j; support after each step -> min-BIC.
+
+Other alternative-backend methods:
 - ``lasso_positive`` -- sklearn ``Lasso(positive=True, fit_intercept=False)``
    over an alpha grid (1e-5..1e-1 by default) -> min-BIC.
 - ``topk_corr_bic``  -- one-shot column ranking by |<a_j, y>|/||a_j||,
@@ -31,14 +38,16 @@ Empty supports are skipped.  ``oracle_exact`` keeps the metric semantics of
 ``scripts/oracle_exact.py``: plain NNLS, 0.05*max(c) trim, BIC with a
 ``+1e-15`` guard inside the logarithm.
 
-Every method returns ``{'method', 'selected', 'concentrations', 'k_pred',
-'bic', 'rss'}`` with a sorted support; ``bic`` is None when no candidate
-produced a non-empty support (then ``rss = ||y||^2``).
+Every method returns :class:`AlternativeResult` -- ``{'method', 'selected',
+'concentrations', 'k_pred', 'bic', 'rss'}`` with a sorted support; ``bic``
+is None when no candidate produced a non-empty support (then
+``rss = ||y||^2``).
 """
 from __future__ import annotations
 
 import itertools
 import warnings
+from typing import TypedDict
 
 import numpy as np
 from scipy.optimize import nnls
@@ -46,16 +55,33 @@ from sklearn.linear_model import Lasso, OrthogonalMatchingPursuit
 
 from .pipeline import EPS_RSS, compute_bic
 
+
+class AlternativeResult(TypedDict):
+    """Result record of one alternative-backend method.
+
+    ``method``: method name; ``selected``: sorted support (list of int);
+    ``concentrations``: NNLS concentrations aligned with ``selected``;
+    ``k_pred``: support size; ``bic``: BIC score (None when no candidate
+    produced a non-empty support); ``rss``: residual sum of squares.
+    """
+    method: str
+    selected: list
+    concentrations: list
+    k_pred: int
+    bic: float | None
+    rss: float
+
+
 #: tau = TAU_FACTOR * max(c) support trim (original nmr_common value).
 TAU_FACTOR = 0.05
-#: Frozen alpha grid of the original LASSO+ baseline.
+#: Frozen alpha grid of the original LASSO+ method.
 LASSO_ALPHA_GRID = [1e-5, 1e-4, 1e-3, 1e-2, 1e-1]
-#: Frozen max_iter of the original LASSO+ baseline.
+#: Frozen max_iter of the original LASSO+ method.
 LASSO_MAX_ITER = 50000
 
-#: Method name -> callable, as used by :func:`run_all_baselines`.
-BASELINE_METHODS = ('omp_bic', 'mp_bic', 'lasso_positive', 'topk_corr_bic',
-                    'oracle_exact')
+#: Method name -> callable, as used by :func:`run_all_alternative`.
+ALTERNATIVE_METHODS = ('omp_bic', 'mp_bic', 'lasso_positive', 'topk_corr_bic',
+                       'oracle_exact')
 
 # Count of suppressed sklearn OMP "ended prematurely due to linear
 # dependence" warnings (kept from the original script for honest logging).
@@ -63,7 +89,7 @@ _OMP_WARN_COUNT = 0
 
 
 # --------------------------------------------------------------------------
-# Shared post-processing (semantics of run_baselines.py)
+# Shared post-processing (semantics of the original research scripts)
 # --------------------------------------------------------------------------
 def threshold_support(cols, concs, tau_factor=TAU_FACTOR):
     """Trim NNLS coefficients with tau = ``tau_factor`` * max(c).
@@ -189,7 +215,7 @@ def mp_bic(A, y, k_max=15):
 
 
 def lasso_positive(A, y, alphas=None):
-    """Lasso(positive=True) over an alpha grid -> min-BIC (the 'LASSO+' baseline).
+    """Lasso(positive=True) over an alpha grid -> min-BIC (the 'LASSO+' method).
 
     ``alphas`` defaults to the frozen grid 1e-5..1e-1.
     """
@@ -307,11 +333,11 @@ def oracle_exact(A, y, max_n=15):
     }
 
 
-def run_all_baselines(A, y, k_max=15):
-    """Run every baseline on ``(A, y)``.
+def run_all_alternative(A, y, k_max=15):
+    """Run every alternative-backend method on ``(A, y)``.
 
     Returns ``{name: result_dict}`` with the five keys of
-    :data:`BASELINE_METHODS`.  ``oracle_exact`` is exponential and raises
+    :data:`ALTERNATIVE_METHODS`.  ``oracle_exact`` is exponential and raises
     ValueError when ``A.shape[1] > 15``.
     """
     return {

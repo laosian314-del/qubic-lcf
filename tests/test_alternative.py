@@ -1,16 +1,16 @@
-"""Tests for qubic.baselines on synthetic LCF mixtures (fixed seed).
+"""Tests for qubic.alternative (alternative backend) on synthetic LCF mixtures (fixed seed).
 
-Every baseline must return the shared result dict; LASSO+ and the exact
-oracle must recover the true support (f1 >= 0.5) at low noise; run_all_baselines
+Every alternative-backend method must return the shared result dict; LASSO+ and the exact
+oracle must recover the true support (f1 >= 0.5) at low noise; run_all_alternative
 must return all five method keys.  No pyfitit required anywhere.
 """
 import numpy as np
 import pytest
 
-from qubic.baselines import (BASELINE_METHODS, lasso_positive, mp_bic,
-                             nnls_thresh_refit, omp_bic, oracle_exact,
-                             run_all_baselines, threshold_support,
-                             topk_corr_bic)
+from qubic.alternative import (ALTERNATIVE_METHODS, lasso_positive, mp_bic,
+                               nnls_thresh_refit, omp_bic, oracle_exact,
+                               run_all_alternative, threshold_support,
+                               topk_corr_bic)
 from qubic.pipeline import compute_f1
 
 K, N = 10, 5
@@ -57,7 +57,7 @@ def test_nnls_thresh_refit_recovers_support():
 
 
 @pytest.mark.parametrize('name', sorted(ALL_METHODS))
-def test_baseline_result_contract(name):
+def test_alternative_result_contract(name):
     A, y = make_case(noise=1e-3)
     res = ALL_METHODS[name](A, y)
     assert set(res) == REQUIRED_KEYS
@@ -72,14 +72,14 @@ def test_baseline_result_contract(name):
 
 
 @pytest.mark.parametrize('name', ['lasso_positive', 'oracle_exact'])
-def test_baseline_finds_true_components(name):
+def test_alternative_finds_true_components(name):
     A, y = make_case(noise=1e-3)
     res = ALL_METHODS[name](A, y)
     assert compute_f1(res['selected'], TRUE) >= 0.5
 
 
 @pytest.mark.parametrize('name', sorted(ALL_METHODS))
-def test_baseline_finds_two_components_low_noise(name):
+def test_alternative_finds_two_components_low_noise(name):
     A, y = make_case(noise=1e-3)
     res = ALL_METHODS[name](A, y)
     assert res['k_pred'] >= 1
@@ -99,10 +99,10 @@ def test_oracle_exact_matches_true_support_on_clean_signal():
     assert compute_f1(res['selected'], TRUE) == 1.0
 
 
-def test_run_all_baselines_returns_all_five_methods():
+def test_run_all_alternative_returns_all_five_methods():
     A, y = make_case(noise=1e-3)
-    results = run_all_baselines(A, y, k_max=15)
-    assert set(results) == set(BASELINE_METHODS) == set(ALL_METHODS)
+    results = run_all_alternative(A, y, k_max=15)
+    assert set(results) == set(ALTERNATIVE_METHODS) == set(ALL_METHODS)
     for name, res in results.items():
         assert set(res) == REQUIRED_KEYS
         assert res['method'] == name

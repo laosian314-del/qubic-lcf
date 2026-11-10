@@ -36,13 +36,15 @@ def _build_bqm(dimod, Q, q):
 
 
 def solve_sa(Q, q, var_map, k_max=15, time_limit=None, top_k=20,
-             num_sweeps=None, n_reads_per_call=None):
+             num_sweeps=None, n_reads_per_call=None, beta_range=None):
     """Simulated Annealing via dimod (ported semantics).
 
     Repeatedly draws batches of reads until the time budget is exhausted or
     ``top_k`` distinct component selections have been collected. Batch sizes
     and sweep counts scale with problem size exactly as in the original
-    benchmark implementation.
+    benchmark implementation.  ``beta_range`` is an optional ``(beta_start,
+    beta_end)`` inverse-temperature schedule forwarded to dimod
+    (None -> dimod's default schedule).
 
     Returns ``(solutions, wall_time)``.
     """
@@ -73,9 +75,12 @@ def solve_sa(Q, q, var_map, k_max=15, time_limit=None, top_k=20,
         remaining_frac = max(0.1, min(1.0, (time_limit - total_time) / max(time_limit, 1)))
         n_reads = max(1, int(n_reads_per_call * remaining_frac))
 
+        sample_kwargs = {"num_reads": n_reads, "num_sweeps": num_sweeps}
+        if beta_range is not None:
+            sample_kwargs["beta_range"] = tuple(beta_range)
         t0 = time.time()
         try:
-            response = sampler.sample(bqm, num_reads=n_reads, num_sweeps=num_sweeps)
+            response = sampler.sample(bqm, **sample_kwargs)
         except Exception:
             break
         elapsed = time.time() - t0
@@ -96,15 +101,17 @@ def solve_sa(Q, q, var_map, k_max=15, time_limit=None, top_k=20,
 def solve(Q, q, var_map, k_max=15, top_k=20, time_limit=None, **kwargs):
     """Unified solver entry point (see :mod:`qubic.solvers.base`).
 
-    Extra kwargs: ``num_sweeps``, ``n_reads_per_call``. The cardinality bound
-    ``k_max`` is accepted for interface uniformity (SA is unconstrained; the
-    QUBO penalties encode the constraint).
+    Extra kwargs: ``num_sweeps``, ``n_reads_per_call``, ``beta_range``. The
+    cardinality bound ``k_max`` is accepted for interface uniformity (SA is
+    unconstrained; the QUBO penalties encode the constraint).
     """
     num_sweeps = kwargs.pop("num_sweeps", None)
     n_reads_per_call = kwargs.pop("n_reads_per_call", None)
+    beta_range = kwargs.pop("beta_range", None)
     base.reject_unknown_kwargs("sa.solve", kwargs)
     pairs, wall_time = solve_sa(Q, q, var_map, k_max=k_max, time_limit=time_limit,
                                 top_k=top_k, num_sweeps=num_sweeps,
-                                n_reads_per_call=n_reads_per_call)
+                                n_reads_per_call=n_reads_per_call,
+                                beta_range=beta_range)
     solutions = base.finalize((s for s, _ in pairs), Q, q, top_k)
     return solutions, wall_time, None

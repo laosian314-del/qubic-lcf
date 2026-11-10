@@ -1,52 +1,172 @@
-# QUBIC-LCF
+# **QUBIC**
 
-**QUBO-based combinatorial linear-combination fitting for XAS/XANES spectra.**
+**QUBIC** is a hybrid QUBO–LCF method for sparse linear-combination fitting of
+spectra: it maps component *selection* onto a QUBO (quadratic unconstrained
+binary optimization) problem, solves it with off-the-shelf combinatorial
+solvers under a fixed time budget, and then refines the surviving candidates
+with continuous non-negative least squares and BIC model selection.
+`qubic-lcf` is just the repository/package name — the method itself is called
+**QUBIC**.
 
-QUBIC-LCF solves the linear combination fitting (LCF) problem for X-ray
-absorption spectroscopy (XAS/XANES): given a target spectrum `y` and a
-reference library `A` (one reference spectrum per column), find *which*
-references participate in the mixture and *what* their concentrations are.
-Instead of relaxing the discrete selection, QUBIC-LCF maps subset selection
-onto a QUBO (quadratic unconstrained binary optimization) problem and attacks
-it with off-the-shelf combinatorial solvers.
+![Graphical abstract: hybrid QUBO-LCF pipeline — spectrum to QUBO solver to top-K to LCF fit](docs/assets/fig_graphical_abstract.png)
+*Graphical abstract of the **QUBIC** paper: hybrid QUBO–LCF pipeline (spectrum → QUBO solver → top-K → LCF fit).*
 
-The full method is a hybrid pipeline:
+![The 6-stage QUBIC pipeline](docs/assets/fig_pipeline.png)
+*The 6-stage **QUBIC** pipeline: XANES input → QUBO solver (MILP/SA) → top-K candidates → NNLS refinement → concentration threshold → BIC selection → LCF fit.*
 
+## About
+
+**QUBIC** solves the discrete model-selection step of linear combination
+fitting (LCF) exactly where classical continuous relaxations fail: when
+reference spectra are strongly correlated and the combination space is huge.
+It encodes subset selection as a QUBO over binary variables, delegates the
+search to any QUBO solver, and keeps a full statistical pipeline (NNLS
+refinement, concentration thresholding, BIC) around it. The result is a
+ranked list of top-K candidate supports with fitted concentrations.
+
+## Scope
+
+**QUBIC** was developed for LCF and NMR, and spectroscopy in general, but it
+is applicable to **any** sparse regression / sparse decomposition task with
+strong component correlation, noise, and a very large combination space.
+
+## What is LCF?
+
+Linear combination fitting models a measured spectrum $y \in \mathbb{R}^M$ as
+a non-negative mixture of $N$ reference spectra (the columns of the
+$M \times N$ matrix $A$):
+
+$$y = A c + \varepsilon,$$
+
+where $c \ge 0$ is the vector of concentrations and $\varepsilon$ is noise.
+The goal is to choose a **support** $S \subseteq \{1, \dots, N\}$ — the subset
+of components that actually participate in the mixture — with $|S| \le k_{\max}$,
+and non-negative concentrations $c_S \ge 0$ that minimize the squared residual
+norm
+
+$$\min_{S,\; c_S \ge 0} \; \bigl\| y - A_S c_S \bigr\|_2^2,$$
+
+equivalently minimizing the R-factor. Here $A_S$ is the submatrix of $A$
+restricted to the columns in $S$.
+
+For multi-edge NMR the same criterion is summed over edges $e$ with weights
+$w_e$:
+
+$$\min_{c \ge 0} \; \sum_e w_e \, \bigl\| y_e - A_e c \bigr\|_2^2.$$
+
+## Why a QUBO?
+
+The difficulty is combinatorial. Brute-force full enumeration requires
+
+$$\sum_{k=1}^{k_{\max}} \binom{N}{k} \;\approx\; 2^N$$
+
+subset checks — for the real case $N = 324$ this is astronomically infeasible
+(about $10^{97}$ combinations) — and **each** candidate requires a
+least-squares refit on top of that.
+
+**QUBIC** maps the selection problem to a QUBO over $N \times B$ binary
+variables (e.g. $2N$ variables for the 2-bit encoding), which any QUBO solver
+can optimize under a fixed time budget. The worst case is still NP-hard, but
+the budget-bounded search is tractable in practice and returns top-K candidate
+supports. The exact exhaustive oracle is kept only for $N \le 15$.
+
+## Encodings
+
+The registry `SCHEMES` provides one encoding per key; each encodes subset
+selection with a different number of binary variables per component and
+different penalty structure.
+
+| Key          | Variables / component | Description                                          |
+|--------------|-----------------------|------------------------------------------------------|
+| `B1`         | 1                     | one-hot selector                                     |
+| `B2`         | 2                     | 2-bit encoding                                       |
+| `B3`         | 3                     | one-hot triplet (unlinked)                           |
+| `B4`         | 4                     | one-hot quartet (unlinked)                           |
+| `linked_B2`  | 3                     | selector + residue bits, linked encoding             |
+| `linked_B3`  | 4                     | selector + residue bits, linked encoding             |
+| `linked_B4`  | 5                     | selector + residue bits, linked encoding             |
+
+## Solvers
+
+Each solver is a class bundling its own settings; an instance is passed
+whole to `task.solve(...)` — uniformly for the QUBO and the alternative
+backend. Backends are imported lazily; only the solver you run needs its
+optional dependency installed.
+
+| Class      | Key      | Backend                                        | Optional dependency |
+|------------|----------|------------------------------------------------|---------------------|
+| `MILP`     | `milp`   | MILP (CBC via PuLP)                            | `pulp`              |
+| `HiGHS`    | `highs`  | HiGHS via PuLP (CBC fallback)                  | `pulp`              |
+| `CP_SAT`   | `cp_sat` | OR-Tools CP-SAT                                | `ortools`           |
+| `SCIP`     | `scip`   | SCIP via PySCIPOpt                             | `pyscipopt`         |
+| `SA`       | `sa`     | simulated annealing                            | `dimod`             |
+| `Tabu`     | `tabu`   | tabu search                                    | `dimod`, `dwave-tabu` |
+| `GPU_SA`   | `gpu_sa` | GPU simulated annealing (CUDA)                 | `torch` (CUDA)      |
+| `SQAOD`    | `sqaod`  | simulated quantum annealing                    | `sqaod` (optional)  |
+| `QAOA`     | `qaoa`   | QAOA                                           | `qubo-lib` (optional) |
+
+### Penalties and thresholds: `lambdas` and `tau`
+
+The QUBO penalty coefficients are configurable per solver through
+`lambdas` — either a constant dict or **a callable of the data**, so the
+penalties can scale with the spectrum instead of being hard-coded:
+
+```python
+# constant penalties
+res = task.solve(qubic.MILP(lambdas={"lam_sparse": 0.5, "lam_link": 2.0}))
+
+# spectrum-dependent penalties: proportional to ||y||^2
+def penalties(A, y):
+    scale = float(y @ y)
+    return {"lam_sparse": 0.01 * scale, "lam_link": 0.05 * scale}
+
+res = task.solve(qubic.MILP(lambdas=penalties))
 ```
-QUBO encoding  ->  combinatorial solver  ->  top-K candidate subsets
-               ->  NNLS concentration refine  ->  concentration threshold
-               ->  BIC model selection  ->  final support + concentrations
-```
 
-The QUBO stage explores the combinatorial subset space; the NNLS refine
-stage re-fits non-negative concentrations continuously; the threshold drops
-spurious components; and the Bayesian information criterion (BIC) picks the
-final model among the top-K candidates.
+Allowed keys are encoding-specific (`lam_sparse` — cardinality penalty;
+`lam_link` — selection/quantization link; `lam_antimix` — anti-mixing for
+`B3`/`B4`); missing keys fall back to documented defaults. `tau`, the
+concentration cutoff of the refinement stage, is a parameter of `Problem`
+(refitted concentrations $\le \tau$ are trimmed from the reported support).
+
+**Lazy semantics — "don't pay for what you don't use":** nothing is built
+at `Problem` construction. A QUBO-backed solver builds the QUBO inside its
+`solve` call only (memoized on the problem, so several QUBO solvers on the
+same problem build it at most once); the alternative backend never triggers
+any QUBO work.
+
+## Alternative backend
+
+In the paper, the greedy/lasso family — greedy forward selection (MP, OMP),
+lasso+, top-k, and the oracle exact search for $N \le 15$ — is presented as
+baselines. In this project, however, it is a fully functional **alternative
+backend** to the QUBO solver, not merely a comparison point: it is typically
+about an order of magnitude faster, but it can degrade on noisy, ill-defined
+and strongly correlated cases. It is a legitimate part of the pipeline
+(module `qubic.alternative`, entry point `run_all_alternative()`) and is
+useful on its own.
 
 ## Installation
 
 Core dependencies are `numpy`, `scipy` and `scikit-learn`. Solver backends
-are optional extras. To install everything (editable install, all solvers):
+are optional extras.
 
 ```bash
-pip install -e '.[all]'
+pip install qubic-lcf
+# or the latest development version:
+pip install git+https://github.com/laosian314-del/qubic-lcf.git
 ```
 
 Selective extras:
 
 ```bash
-pip install -e '.[milp]'    # PuLP / CBC MILP solver
-pip install -e '.[cpsat]'   # OR-Tools CP-SAT solver
-pip install -e '.[sa]'      # simulated annealing (dimod)
-pip install -e '.[tabu]'    # tabu search (dimod + dwave-tabu)
-pip install -e '.[gpu]'     # GPU simulated annealing (torch)
-```
-
-Pinned versions of the reference environment are listed in
-[`requirements.txt`](requirements.txt):
-
-```bash
-pip install -r requirements.txt
+pip install "qubic-lcf[milp]"     # CBC via PuLP
+pip install "qubic-lcf[cp-sat]"   # OR-Tools CP-SAT
+pip install "qubic-lcf[scip]"     # PySCIPOpt
+pip install "qubic-lcf[gpu]"      # GPU simulated annealing (CUDA)
+pip install "qubic-lcf[qaoa]"     # QAOA (qubo-lib)
+pip install "qubic-lcf[sqaod]"    # simulated quantum annealing
+pip install "qubic-lcf[all]"      # everything
 ```
 
 ## Quickstart
@@ -67,121 +187,97 @@ true_idx = [1, 3]
 true_conc = np.array([0.4, 0.6])
 target = A[:, true_idx] @ true_conc + 0.01 * np.random.randn(10)
 
-# 1. Build the QUBO for the B1 encoding (1 binary variable per reference).
-Q, q, var_map, decode = qubic.build_qubo("B1", A, target, k=2)
+# 1. Describe the task once.
+task = qubic.Problem(A, target, k_max=2, tau=0.01)
 
-# 2. Solve it with the MILP backend (CBC via PuLP).
-solutions = qubic.solve("milp", Q, q, var_map, top_k=10)
+# 2. Pick a solver object (bundles its own settings) and run it.
+res = task.solve(qubic.MILP(time_limit=30.0), top_k=10)
+print("score        =", res.best_score)
+print("support      =", res.best_support)
+print("concentrations =", res.best_concentrations)
+print("top_K        =", res.top_K)
+print("stats        =", res.stats)
 
-# 3. Or run the full hybrid pipeline in one call.
-result = qubic.run_pipeline(A, target, k_true=2, gt_indices=true_idx,
-                            scheme="B1", solver="milp", top_k=10)
-print("f1 =", result["f1"], " k_pred =", result["k_pred"])
-print("concentrations =", result["concentrations"])
+# 3. Any other solver plugs in identically.
+res = task.solve(qubic.SA(restarts=20, T0=1.0))
 
-# 4. Compare against the classical baselines.
-baselines = qubic.run_all_baselines(A, target, gt_indices=true_idx)
-for name, res in baselines.items():
-    print(name, "f1 =", res["f1"], "k_pred =", res["k_pred"])
+# 4. The alternative backend uses the exact same interface.
+res = task.solve(qubic.OMP())
 ```
 
-## QUBO encodings
+The pipeline stage chain is: XANES input → QUBO solver (MILP/SA) → top-K
+candidates → NNLS refinement → concentration threshold ($\tau$) → BIC
+selection → LCF fit. The returned `Result` carries `selected`,
+`concentrations`, `bic` (aliases `best_support`, `best_concentrations`,
+`best_score`), the full `top_K` candidate list and per-run `stats`. The
+low-level building blocks (QUBO construction, encodings, the solver
+registry) remain available in the submodules for advanced use.
 
-Each scheme encodes the subset-selection problem with a different number of
-binary variables per reference component and different penalty terms.
+## Pyfitit integration
 
-| Scheme      | Variables per component | Description                                                    |
-|-------------|-------------------------|----------------------------------------------------------------|
-| `B1`        | 1                       | binary selection only                                          |
-| `B2`        | 3                       | selector + 2 quantization bits                                 |
-| `3bit`      | 3                       | Rubtsov anti-mixing penalty, not linked                        |
-| `4bit`      | 4                       | Rubtsov anti-mixing penalty, not linked                        |
-| `linked_B2` | 3                       | selector + 2 quantization bits (selector linked to the bits)   |
-| `linked_B3` | 4                       | selector + 3 quantization bits (selector linked to the bits)   |
-| `linked_B4` | 5                       | selector + 4 quantization bits (selector linked to the bits)   |
-
-All schemes are available through the single dispatcher
-`qubic.build_qubo(scheme, A, target, k, **kwargs)`, which returns
-`(Q, q, var_map, decode)`.
-
-## Solvers
-
-All solvers are accessed through `qubic.solve(name, Q, q, var_map, ...)`.
-Backends are imported lazily; only the solver you request needs its
-dependency installed.
-
-| Solver   | Backend                            | Dependency (optional)   | Install extra              |
-|----------|------------------------------------|-------------------------|----------------------------|
-| `milp`   | MILP / CBC via PuLP                | `pulp`                  | `pip install 'qubic-lcf[milp]'`  |
-| `cp_sat` | OR-Tools CP-SAT                    | `ortools`               | `pip install 'qubic-lcf[cpsat]'` |
-| `scip`   | SCIP via PySCIPOpt                 | `pyscipopt`             | `pip install pyscipopt`         |
-| `sa`     | simulated annealing                | `dimod`                 | `pip install 'qubic-lcf[sa]'`   |
-| `tabu`   | tabu search                        | `dimod`, `dwave-tabu`   | `pip install 'qubic-lcf[tabu]'` |
-| `gpu_sa` | GPU simulated annealing            | `torch`                 | `pip install 'qubic-lcf[gpu]'`  |
-| `qaoa`   | QAOA (statevector simulation)      | none (numpy/scipy only) | — (core install)               |
-
-## Baselines
-
-Classical non-combinatorial baselines for comparison, all available via
-`qubic.run_all_baselines(A, target, gt_indices=...)` or individually:
-
-| Name                  | Method                                                             |
-|-----------------------|--------------------------------------------------------------------|
-| `omp`                 | orthogonal matching pursuit + BIC                                  |
-| `mp`                  | matching pursuit + BIC                                             |
-| `lasso+`              | non-negative Lasso (`lasso_positive`) + BIC                        |
-| `topk_corr`           | top-K references by correlation + BIC                              |
-| `oracle_exact`        | brute-force enumeration of all subsets (oracle upper bound)        |
-
-## PyFitIt integration
-
-QUBIC-LCF can be used as a drop-in mixture-search backend for
-[PyFitIt](https://github.com/steam-mock/PyFitIt)-style workflows. The
-`qubic.pyfitit_api` module exposes an analogue of PyFitIt's
-`tryAllMixtures`: it enumerates candidate mixtures with the QUBO pipeline
-instead of PyFitIt's built-in search.
+**QUBIC** can be used as a drop-in mixture-search backend for
+[PyFitit](https://github.com/rapodem/pyfitit)-style workflows: the module
+`qubic.pyfitit_api` exposes `tryallmixtures`, which mirrors
+`pyfitit.mixture.tryallmixtures` but enumerates candidate mixtures with the
+**QUBIC** pipeline instead of the built-in search.
 
 ```python
-from qubic.pyfitit_api import QubicBackend, try_all_mixtures
+from qubic.pyfitit_api import tryallmixtures
 
-backend = QubicBackend(scheme="B2", solver="milp", top_k=10)
-result = try_all_mixtures(A, target, backend=backend)
-print(result["f1"], result["k_pred"], result["concentrations"])
+result = tryallmixtures(A, target, scheme="B2", solver="milp",
+                        top_k_values=(1, 10, 20))
 ```
 
 See [`examples/pyfitit_integration.py`](examples/pyfitit_integration.py) for
-a complete runnable example. **PyFitIt itself is optional** and is not a
+a complete runnable example. **Pyfitit itself is optional** and is not a
 dependency of `qubic-lcf`; install it separately only if you need the full
-PyFitIt workflow. The core pipeline works without it.
+Pyfitit workflow. The core pipeline works without it.
 
-## Data
+## Repository layout
 
-**Experimental data are NOT included in this repository.** No measured
-spectra, reference libraries, or benchmark `.npy`/`.csv` files are shipped
-here. The only data in the repository are *synthetic*: the generator in
-[`examples/quickstart.py`](examples/quickstart.py) creates a small random
-reference library and a ground-truth mixture so that every part of the
-pipeline can be exercised end to end without any external files.
+```
+src/qubic/
+    __init__.py          # public API (lazy facade)
+    problem.py           # Problem + Result: the high-level task object
+    solver.py            # Solver class hierarchy (QuboSolver + alternative)
+    encodings.py         # SCHEMES registry: B1..B4, linked_B2..linked_B4
+    qubo.py              # internal QUBO builder (lambdas: dict or callable)
+    alternative.py       # alternative backend (replaces the former baselines.py)
+    pipeline.py          # refinement: NNLS + tau cutoff + BIC selection
+    pyfitit_api.py       # tryallmixtures (mirrors pyfitit.mixture.tryallmixtures)
+    solvers/             # solver registry: milp, highs, cp_sat, scip, sa, ...
+examples/
+    quickstart.py        # end-to-end synthetic example
+    pyfitit_integration.py
+tests/                   # pytest suite
+docs/assets/             # figures
+```
 
-To reproduce the benchmarks of the accompanying article:
+Note: `src/qubic/alternative.py` replaces `baselines.py`; the old name is no
+longer used.
 
-1. Obtain the experimental XAS/XANES reference library and target spectra
-   (see the data availability statement of the article).
-2. Build the reference matrix `A` (energy points x references) and target
-   vectors `y`, e.g. as NumPy arrays saved to `.npy` files outside this
-   repository (the `data/` and `results/` directories are git-ignored by
-   design).
-3. Run the pipeline over the mixtures with `qubic.run_pipeline` and the
-   baselines with `qubic.run_all_baselines`, sweeping the encoding schemes
-   and solvers listed above.
-4. Aggregate the per-mixture metrics (`f1`, `k_pred`, concentration errors)
-   as reported in the article.
+## Development
 
-## License
+```bash
+pip install -e ".[all]"
+pytest
+```
 
-Released under the [MIT License](LICENSE). Copyright (c) 2026 QUBIC-LCF
-authors.
+## Links
+
+- PyFitit: https://github.com/rapodem/pyfitit
+- Pyfitit article: A. Martini, S. A. Guda, A. A. Guda, G. Yu. Smolentsev,
+  A. Algasov, O. Usoltsev et al., "PyFitit: The software for quantitative
+  analysis of XANES spectra using machine-learning algorithms",
+  *Comput. Phys. Commun.* **250**, 107064 (2020),
+  https://doi.org/10.1016/j.cpc.2019.107064
+- This repository: https://github.com/laosian314-del/qubic-lcf
+- The **QUBIC** article — in preparation.
 
 ## Citation
 
-If you use this code, please cite the accompanying article (in preparation).
+If you use this code, please cite the **QUBIC** article (in preparation).
+
+## License
+
+Released under the [MIT License](LICENSE).

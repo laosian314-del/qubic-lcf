@@ -17,8 +17,8 @@ from qubic.encodings import (
     build_qubo,
     build_qubo_B1,
     build_qubo_B2,
-    build_qubo_3bit,
-    build_qubo_4bit,
+    build_qubo_B3,
+    build_qubo_B4,
     build_qubo_linked,
     energy_terms,
     gammas_from_absolute,
@@ -28,11 +28,11 @@ from qubic.encodings import (
 
 RNG = np.random.default_rng(20261019)
 
-ALL_SCHEMES = ['B1', 'B2', '3bit', '4bit',
+ALL_SCHEMES = ['B1', 'B2', 'B3', 'B4',
                'linked_B2', 'linked_B3', 'linked_B4']
 
 EXPECTED_VARS_PER_COMPONENT = {
-    'B1': 1, 'B2': 3, '3bit': 3, '4bit': 4,
+    'B1': 1, 'B2': 3, 'B3': 3, 'B4': 4,
     'linked_B2': 3, 'linked_B3': 4, 'linked_B4': 5,
 }
 
@@ -46,7 +46,7 @@ def random_problem():
     return A, y, k
 
 
-def _direct_objective(scheme, A, y, k, x, lam_sparse, lam_link, lam_rub):
+def _direct_objective(scheme, A, y, k, x, lam_sparse, lam_link, lam_antimix):
     """Independent recomputation of the full encoding objective H(x).
 
     Includes the state-independent constants ||y||^2 + lam_sparse * k^2 that
@@ -75,7 +75,7 @@ def _direct_objective(scheme, A, y, k, x, lam_sparse, lam_link, lam_rub):
                 c[i] += alpha[b] * qb
                 link += qb * (1 - s)
         link *= lam_link
-    elif scheme == '3bit':
+    elif scheme == 'B3':
         alpha = np.array([4.0 / 7, 2.0 / 7, 1.0 / 7])
         for j in range(N):
             b = x[3 * j:3 * j + 3]
@@ -83,8 +83,8 @@ def _direct_objective(scheme, A, y, k, x, lam_sparse, lam_link, lam_rub):
             sel_bits[j] = b[0]
             f = b[0] + b[1] + b[2] - b[0] * b[1] - b[1] * b[2] - b[0] * b[2]
             pattern += f
-        pattern *= lam_rub
-    elif scheme == '4bit':
+        pattern *= lam_antimix
+    elif scheme == 'B4':
         alpha = np.array([8.0 / 15, 4.0 / 15, 2.0 / 15, 1.0 / 15])
         for j in range(N):
             b = x[4 * j:4 * j + 4]
@@ -93,7 +93,7 @@ def _direct_objective(scheme, A, y, k, x, lam_sparse, lam_link, lam_rub):
             b1, b2, b3 = b[1], b[2], b[3]    # anti-mixing on bits 1..3 only
             f = b1 + b2 + b3 - b1 * b2 - b2 * b3 - b1 * b3
             pattern += f
-        pattern *= lam_rub
+        pattern *= lam_antimix
     else:
         raise ValueError(scheme)
 
@@ -191,7 +191,7 @@ def test_energy_terms_all_schemes():
                 x = RNG.integers(0, 2, size=M).astype(float)
                 t = energy_terms(x, A, y, k, scheme,
                                  lam_sparse=lam_s, lam_link=lam_l,
-                                 lam_rub=lam_r)
+                                 lam_antimix=lam_r)
                 # required keys
                 for key in ('residual', 'sparsity', 'link', 'pattern', 'base',
                             'xQx_plus_qx', 'constant_excluded', 'match_error'):
@@ -260,42 +260,42 @@ def test_linker_states():
 
 
 def test_anti_mixing_penalties():
-    """Rubtsov anti-mixing penalty on crafted bit states."""
+    """3-bit / 4-bit anti-mixing penalty on crafted bit states."""
     A = np.eye(2)
     y = np.array([0.3, -0.2])
     k = 1
     lam_s, lam_r = 1.0, 5.0
 
-    # ---- 3bit: f_j = b0 + b1 + b2 - b0*b1 - b1*b2 - b0*b2 ----
+    # ---- B3: f_j = b0 + b1 + b2 - b0*b1 - b1*b2 - b0*b2 ----
     M = 6
     # all-0 and all-1 states -> pattern 0
     for x in (np.zeros(M), np.ones(M)):
-        t = energy_terms(x, A, y, k, '3bit',
-                         lam_sparse=lam_s, lam_rub=lam_r)
+        t = energy_terms(x, A, y, k, 'B3',
+                         lam_sparse=lam_s, lam_antimix=lam_r)
         assert abs(t['pattern']) < 1e-12, t['pattern']
         assert t['match_error'] <= 1e-9
-    # mixed states -> pattern = lam_rub * sum f_j
+    # mixed states -> pattern = lam_antimix * sum f_j
     x = np.zeros(M)
     x[0] = 1.0                       # (1,0,0): f = 1
     x[3:6] = [1.0, 1.0, 0.0]         # (1,1,0): f = 2 - 1 = 1
-    t = energy_terms(x, A, y, k, '3bit',
-                     lam_sparse=lam_s, lam_rub=lam_r)
+    t = energy_terms(x, A, y, k, 'B3',
+                     lam_sparse=lam_s, lam_antimix=lam_r)
     assert abs(t['pattern'] - lam_r * 2.0) < 1e-12, t['pattern']
     assert t['match_error'] <= 1e-9
 
-    # ---- 4bit: anti-mixing on bits 1..3 only ----
+    # ---- B4: anti-mixing on bits 1..3 only ----
     M = 8
     # bit pattern (1,1,1,1): lower bits all-1 -> pattern 0
     x = np.ones(M)
-    t = energy_terms(x, A, y, k, '4bit',
-                     lam_sparse=lam_s, lam_rub=lam_r)
+    t = energy_terms(x, A, y, k, 'B4',
+                     lam_sparse=lam_s, lam_antimix=lam_r)
     assert abs(t['pattern']) < 1e-12
     assert t['match_error'] <= 1e-9
     # component 0 bits (1,1,0,0): f on bits 1..3 = (1,0,0) -> f = 1
     x = np.zeros(M)
     x[0:4] = [1.0, 1.0, 0.0, 0.0]
-    t = energy_terms(x, A, y, k, '4bit',
-                     lam_sparse=lam_s, lam_rub=lam_r)
+    t = energy_terms(x, A, y, k, 'B4',
+                     lam_sparse=lam_s, lam_antimix=lam_r)
     assert abs(t['pattern'] - lam_r * 1.0) < 1e-12, t['pattern']
     assert t['match_error'] <= 1e-9
 
@@ -377,8 +377,8 @@ def test_q_generation_and_energy_identity():
         kwargs = {'lam_sparse': lam_s}
         if scheme in ('B2', 'linked_B2', 'linked_B3', 'linked_B4'):
             kwargs['lam_link'] = lam_l
-        if scheme in ('3bit', '4bit'):
-            kwargs['lam_rub'] = lam_r
+        if scheme in ('B3', 'B4'):
+            kwargs['lam_antimix'] = lam_r
         Q, q, vm, dec = build_qubo(scheme, A, y, k, **kwargs)
         M = EXPECTED_VARS_PER_COMPONENT[scheme] * N
 

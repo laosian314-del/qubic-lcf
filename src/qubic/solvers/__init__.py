@@ -13,7 +13,12 @@ Every solver implements the same contract::
     gap : float | None — optimality gap when the solver reports one
 
 ``SOLVERS`` maps solver name -> callable with the same signature as the
-unified ``solve`` (minus the ``solver`` argument). Optional dependencies are
+unified ``solve`` (minus the ``solver`` argument): ``milp`` (PuLP MILP on
+the McCormick linearization), ``highs`` (PuLP HiGHS MILP with CBC
+fallback), ``cp_sat`` (OR-Tools CP-SAT), ``scip`` (PySCIPOpt), ``sa``
+(dimod simulated annealing), ``tabu`` (dwave-samplers TabuSampler),
+``gpu_sa`` (PyTorch GPU annealer), ``sqaod`` (sqaod simulated quantum
+annealing) and ``qaoa`` (QAOA via SciPy COBYLA). Optional dependencies are
 resolved lazily inside each solver; a missing dependency raises ImportError
 with a ``pip install ...`` hint. :func:`available_solvers` lists the solvers
 whose dependencies are actually usable in the current environment.
@@ -22,28 +27,33 @@ from __future__ import annotations
 
 import importlib.util
 
-from . import base, cp_sat, gpu_sa, milp, qaoa, sa, scip, tabu
+from . import (base, cp_sat, gpu_sa, highs, milp, qaoa, sa, scip, sqaod,
+               tabu)
 from .base import DEFAULT_TIME_LIMIT, get_selection, qubo_energy
 
 #: Registry: solver name -> callable(Q, q, var_map, k_max, top_k, time_limit, **kw).
 SOLVERS = {
     "milp": milp.solve,
+    "highs": highs.solve,
     "cp_sat": cp_sat.solve,
     "scip": scip.solve,
     "sa": sa.solve,
     "tabu": tabu.solve,
     "gpu_sa": gpu_sa.solve,
+    "sqaod": sqaod.solve,
     "qaoa": qaoa.solve,
 }
 
 #: Optional dependencies per solver: (module path, PyPI package name).
 _DEPS = {
     "milp": (("pulp", "pulp"),),
+    "highs": (("pulp", "pulp"),),
     "cp_sat": (("ortools", "ortools"),),
     "scip": (("pyscipopt", "pyscipopt"),),
     "sa": (("dimod", "dimod"),),
     "tabu": (("dwave.samplers", "dwave-samplers"), ("dimod", "dimod")),
     "gpu_sa": (("torch", "torch"),),
+    "sqaod": (("sqaod", "sqaod"),),
     "qaoa": (("scipy", "scipy"),),
 }
 

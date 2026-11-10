@@ -99,6 +99,47 @@ def compute_f1(pred, gt):
     return 2 * p * r / (p + r) if (p + r) > 0 else 0.0
 
 
+def refine_candidate(A, target, selected, tau):
+    """Refinement stage for one candidate support: NNLS -> tau cutoff -> BIC.
+
+    Mirrors the candidate loop of :func:`run_pipeline`:
+    1. NNLS refit on the candidate support (ridge row ``RIDGE``,
+       concentrations normalized to sum 1);
+    2. concentrations <= ``tau`` are trimmed from the reported support;
+    3. BIC is computed on the trimmed support (RSS floored at ``EPS_RSS``).
+
+    Returns ``(support, concentrations, rss, bic)`` or ``None`` when
+    ``selected`` is empty.
+    """
+    sel = [int(i) for i in selected]
+    if not sel:
+        return None
+    conc, rss = nnls_refine(A, target, sel)
+    sel_filtered = [sel[i] for i in range(len(sel)) if conc[i] > tau]
+    conc_filtered = conc[conc > tau]
+    bic = compute_bic(max(rss, EPS_RSS), len(sel_filtered), len(target))
+    return sel_filtered, conc_filtered, rss, bic
+
+
+def full_library_candidate(A, target, tau):
+    """Fallback candidate: NNLS on the whole library (``run_pipeline`` step 5).
+
+    Same ridge row, ``tau`` cutoff and BIC as :func:`refine_candidate`.
+    Returns ``(support, concentrations, rss, bic)``.
+    """
+    N = A.shape[1]
+    A_aug = np.vstack([A, np.ones(N) * RIDGE])
+    b_aug = np.hstack([target, [RIDGE]])
+    c_full, _ = nnls(A_aug, b_aug)
+    if c_full.sum() > 0:
+        c_full = c_full / c_full.sum()
+    sel_full = [i for i in range(N) if c_full[i] > tau]
+    conc_full = c_full[c_full > tau]
+    rss_full = float(np.sum((target - A[:, sel_full] @ conc_full) ** 2))
+    bic_full = compute_bic(max(rss_full, EPS_RSS), len(sel_full), len(target))
+    return sel_full, conc_full, rss_full, bic_full
+
+
 def run_pipeline(A, target, k_true=None, gt_indices=None, scheme='B1',
                  solver='milp', top_k_values=(1, 10, 20), k_max=15,
                  time_limit=None, max_solutions=20, threshold_frac=0.01,
@@ -135,7 +176,7 @@ def run_pipeline(A, target, k_true=None, gt_indices=None, scheme='B1',
         Concentrations <= this value (after sum-1 normalization) are trimmed
         from the reported support (0.01 by default, as in the original).
     **qubo_kwargs
-        Extra encoding options (``lam_sparse``, ``lam_link``, ``lam_rub``, or
+        Extra encoding options (``lam_sparse``, ``lam_link``, ``lam_antimix``, or
         an explicit cardinality ``k``).
 
     Returns

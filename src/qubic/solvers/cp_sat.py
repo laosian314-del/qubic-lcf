@@ -101,7 +101,18 @@ def solve_cp_sat(Q, q, var_map, k_max, time_limit=None, top_k=TOP_K_CANDIDATES):
             for b in range(2):
                 qi = idx_q(j, b)
                 model.Add(x[qi] <= x[si])
-    elif scheme in ("3bit", "4bit"):
+    elif scheme.startswith("linked_"):
+        idx_s = var_map["idx_s"]
+        idx_q = var_map["idx_q"]
+        B = var_map["B"]
+        for j in range(N):
+            model.Add(z[j] == x[idx_s(j)])
+        # Hard link: if a component is not selected, its q-bits are 0
+        for j in range(N):
+            si = idx_s(j)
+            for b in range(B):
+                model.Add(x[idx_q(j, b)] <= x[si])
+    elif scheme in ("B3", "B4"):
         vpc = var_map["vars_per_component"]
         idx_fn = var_map["idx"]
         for j in range(N):
@@ -112,7 +123,7 @@ def solve_cp_sat(Q, q, var_map, k_max, time_limit=None, top_k=TOP_K_CANDIDATES):
     else:
         raise ValueError(
             f"solve_cp_sat: unsupported scheme {scheme!r}; "
-            "expected 'B1', 'B2', '3bit' or '4bit'"
+            "expected 'B1', 'B2', 'B3' or 'B4'"
         )
 
     # --- Cardinality constraint ------------------------------------------

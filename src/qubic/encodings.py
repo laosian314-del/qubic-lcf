@@ -7,10 +7,10 @@ Schemes (keys of :data:`SCHEMES`):
   B1        -- Binary selection only (N vars). Concentrations via NNLS post-hoc.
   B2        -- Selection s_i + 2-bit quantization q_i0,q_i1 (3N vars).
                c_i = s_i * (1/3 * q_i0 + 2/3 * q_i1)
-  3bit      -- Rubtsov 3-bit encoding (3N vars, no explicit selection).
+  B3        -- 3-bit anti-mixing encoding (3N vars, no explicit selection).
                c_j = (1/7) * (4*s_j0 + 2*s_j1 + s_j2)
                Anti-mixing penalty pushes bits toward 000 or near-111.
-  4bit      -- Rubtsov 4-bit encoding (4N vars).
+  B4        -- 4-bit anti-mixing encoding (4N vars).
                c_j = (1/15) * (8*s_j0 + 4*s_j1 + 2*s_j2 + s_j3)
   linked_B{2,3,4} -- Linked-selection encoding: per component i one selector
                s_i plus B quantization bits q_i0..q_i{B-1}, M = (B+1)*N.
@@ -157,9 +157,9 @@ def build_qubo_B2(A, target, k, lam_sparse=1.0, lam_link=5.0):
     return Q, q, var_map, decode
 
 
-def build_qubo_3bit(A, target, k, lam_sparse=1.0, lam_rub=5.0):
+def build_qubo_B3(A, target, k, lam_sparse=1.0, lam_antimix=5.0):
     """
-    3-bit Rubtsov encoding (3N vars).
+    3-bit anti-mixing encoding (3N vars).
     c_j = (1/7) * (4*s_j0 + 2*s_j1 + s_j2)
     alpha = [4/7, 2/7, 1/7]
 
@@ -168,7 +168,7 @@ def build_qubo_3bit(A, target, k, lam_sparse=1.0, lam_rub=5.0):
     = 0 iff bits are all-0 or all-1. Positive for mixed states.
 
     Sparsity: lam_sparse * (sum_j s_j0 - k)^2
-    Uses s_j0 as selection proxy (with Rubtsov penalty, selected
+    Uses s_j0 as selection proxy (with the anti-mixing penalty, selected
     components tend to have all bits ~ 1).
 
     NO normalization penalty — NNLS handles it.
@@ -210,14 +210,14 @@ def build_qubo_3bit(A, target, k, lam_sparse=1.0, lam_rub=5.0):
                     Q[ii, jj] += coeff
                     Q[jj, ii] += coeff
 
-    # ---- Rubtsov anti-mixing penalty ----
+    # ---- Anti-mixing penalty ----
     for j in range(N):
         for b in range(3):
-            Q[idx(j, b), idx(j, b)] += lam_rub
+            Q[idx(j, b), idx(j, b)] += lam_antimix
         for b1 in range(3):
             for b2 in range(b1 + 1, 3):
-                Q[idx(j, b1), idx(j, b2)] -= lam_rub / 2
-                Q[idx(j, b2), idx(j, b1)] -= lam_rub / 2
+                Q[idx(j, b1), idx(j, b2)] -= lam_antimix / 2
+                Q[idx(j, b2), idx(j, b1)] -= lam_antimix / 2
 
     # ---- Sparsity on s_j0 ----
     for j1 in range(N):
@@ -229,7 +229,7 @@ def build_qubo_3bit(A, target, k, lam_sparse=1.0, lam_rub=5.0):
             Q[jj, ii] += lam_sparse
 
     var_map = {
-        'scheme': '3bit', 'N': N, 'M': M,
+        'scheme': 'B3', 'N': N, 'M': M,
         'vars_per_component': 3, 'selection': 'any_bit',
         'alpha': alpha, 'idx': idx,
     }
@@ -248,9 +248,9 @@ def build_qubo_3bit(A, target, k, lam_sparse=1.0, lam_rub=5.0):
     return Q, q_vec, var_map, decode
 
 
-def build_qubo_4bit(A, target, k, lam_sparse=1.0, lam_rub=5.0):
+def build_qubo_B4(A, target, k, lam_sparse=1.0, lam_antimix=5.0):
     """
-    4-bit Rubtsov encoding (4N vars).
+    4-bit anti-mixing encoding (4N vars).
     c_j = (1/15) * (8*s_j0 + 4*s_j1 + 2*s_j2 + s_j3)
 
     Anti-mixing on lower 3 bits (b=1,2,3).
@@ -293,11 +293,11 @@ def build_qubo_4bit(A, target, k, lam_sparse=1.0, lam_rub=5.0):
     # Anti-mixing on lower 3 bits
     for j in range(N):
         for b in range(1, 4):
-            Q[idx(j, b), idx(j, b)] += lam_rub
+            Q[idx(j, b), idx(j, b)] += lam_antimix
         for b1 in range(1, 4):
             for b2 in range(b1 + 1, 4):
-                Q[idx(j, b1), idx(j, b2)] -= lam_rub / 2
-                Q[idx(j, b2), idx(j, b1)] -= lam_rub / 2
+                Q[idx(j, b1), idx(j, b2)] -= lam_antimix / 2
+                Q[idx(j, b2), idx(j, b1)] -= lam_antimix / 2
 
     # Sparsity on s_j0
     for j1 in range(N):
@@ -309,7 +309,7 @@ def build_qubo_4bit(A, target, k, lam_sparse=1.0, lam_rub=5.0):
             Q[jj, ii] += lam_sparse
 
     var_map = {
-        'scheme': '4bit', 'N': N, 'M': M,
+        'scheme': 'B4', 'N': N, 'M': M,
         'vars_per_component': 4, 'selection': 'any_bit',
         'alpha': alpha, 'idx': idx,
     }
@@ -474,8 +474,8 @@ def _build_qubo_linked_B4(A, target, k, lam_sparse=1.0, lam_link=5.0):
 SCHEMES = {
     'B1': build_qubo_B1,
     'B2': build_qubo_B2,
-    '3bit': build_qubo_3bit,
-    '4bit': build_qubo_4bit,
+    'B3': build_qubo_B3,
+    'B4': build_qubo_B4,
     'linked_B2': _build_qubo_linked_B2,
     'linked_B3': _build_qubo_linked_B3,
     'linked_B4': _build_qubo_linked_B4,
@@ -493,7 +493,7 @@ def build_qubo(scheme, A, target, k, **kwargs):
 # Direct energy decomposition
 # --------------------------------------------------------------------------
 
-def _direct_terms_original(scheme, A, y, k, x, lam_sparse, lam_link, lam_rub):
+def _direct_terms_original(scheme, A, y, k, x, lam_sparse, lam_link, lam_antimix):
     """Direct H decomposition for the 4 original non-linked schemes.
 
     Returns (residual, sparsity, link, pattern).
@@ -517,7 +517,7 @@ def _direct_terms_original(scheme, A, y, k, x, lam_sparse, lam_link, lam_rub):
             link += q0 * (1 - s) + q1 * (1 - s)
         link *= lam_link
         pattern = 0.0
-    elif scheme == '3bit':
+    elif scheme == 'B3':
         alpha = np.array([4.0 / 7, 2.0 / 7, 1.0 / 7])
         c = np.zeros(N)
         sel_bits = np.zeros(N)
@@ -528,9 +528,9 @@ def _direct_terms_original(scheme, A, y, k, x, lam_sparse, lam_link, lam_rub):
             sel_bits[j] = b[0]
             f = b[0] + b[1] + b[2] - b[0] * b[1] - b[1] * b[2] - b[0] * b[2]
             pattern += f
-        pattern *= lam_rub
+        pattern *= lam_antimix
         link = 0.0
-    elif scheme == '4bit':
+    elif scheme == 'B4':
         alpha = np.array([8.0 / 15, 4.0 / 15, 2.0 / 15, 1.0 / 15])
         c = np.zeros(N)
         sel_bits = np.zeros(N)
@@ -542,7 +542,7 @@ def _direct_terms_original(scheme, A, y, k, x, lam_sparse, lam_link, lam_rub):
             b1, b2, b3 = b[1], b[2], b[3]   # anti-mixing on bits 1..3 only
             f = b1 + b2 + b3 - b1 * b2 - b2 * b3 - b1 * b3
             pattern += f
-        pattern *= lam_rub
+        pattern *= lam_antimix
         link = 0.0
     else:
         raise ValueError(scheme)
@@ -581,10 +581,10 @@ def _direct_terms_linked(B, A, y, k, x, lam_sparse, lam_link):
 
 
 def energy_terms(sample, A, y, k, scheme,
-                 lam_sparse=1.0, lam_link=5.0, lam_rub=5.0):
+                 lam_sparse=1.0, lam_link=5.0, lam_antimix=5.0):
     """Direct energy decomposition of H for one bit state.
 
-    scheme in {'B1','B2','3bit','4bit','linked_B2','linked_B3','linked_B4'}
+    scheme in {'B1','B2','B3','B4','linked_B2','linked_B3','linked_B4'}
 
     Returns dict with keys:
       'residual', 'sparsity', 'link', 'pattern', 'base',
@@ -601,12 +601,12 @@ def energy_terms(sample, A, y, k, scheme,
     x = np.asarray(sample, dtype=float).ravel()
 
     # ---- matching builder (also gives Q, q for the quadratic form) ----
-    if scheme in ('B1', 'B2', '3bit', '4bit'):
+    if scheme in ('B1', 'B2', 'B3', 'B4'):
         kwargs = {'lam_sparse': lam_sparse}
         if scheme == 'B2':
             kwargs['lam_link'] = lam_link
-        if scheme in ('3bit', '4bit'):
-            kwargs['lam_rub'] = lam_rub
+        if scheme in ('B3', 'B4'):
+            kwargs['lam_antimix'] = lam_antimix
         Q, q, var_map, _ = build_qubo(scheme, A, y, k, **kwargs)
     elif scheme in ('linked_B2', 'linked_B3', 'linked_B4'):
         B = int(scheme.split('_B')[1])
@@ -622,7 +622,7 @@ def energy_terms(sample, A, y, k, scheme,
             B, A, y, k, x, lam_sparse, lam_link)
     else:
         residual, sparsity, link, pattern = _direct_terms_original(
-            scheme, A, y, k, x, lam_sparse, lam_link, lam_rub)
+            scheme, A, y, k, x, lam_sparse, lam_link, lam_antimix)
 
     base = residual + sparsity + link + pattern
     xQx_plus_qx = float(x @ Q @ x + q @ x)

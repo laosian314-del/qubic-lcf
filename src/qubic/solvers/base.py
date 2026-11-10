@@ -63,15 +63,19 @@ def get_selection(sample, var_map):
         idx_s = var_map["idx_s"]
         for j in range(N):
             z[j] = sample[idx_s(j)] > 0.5
-    elif scheme in ("3bit", "4bit"):
+    elif scheme in ("B3", "B4"):
         vpc = var_map["vars_per_component"]
         idx_fn = var_map["idx"]
         for j in range(N):
             z[j] = any(sample[idx_fn(j, b)] > 0.5 for b in range(vpc))
+    elif scheme.startswith("linked_"):
+        idx_s = var_map["idx_s"]
+        for j in range(N):
+            z[j] = sample[idx_s(j)] > 0.5
     else:
         raise ValueError(
             f"get_selection: unsupported scheme {scheme!r}; "
-            "expected 'B1', 'B2', '3bit' or '4bit'"
+            "expected 'B1', 'B2', 'B3', 'B4' or 'linked_B{2,3,4}'"
         )
     return z
 

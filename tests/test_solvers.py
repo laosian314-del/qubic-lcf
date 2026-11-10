@@ -14,7 +14,8 @@ import pytest
 from qubic.solvers import SOLVERS, available_solvers, solve
 from qubic.solvers.qaoa import MAX_QUBITS, ising_energy, qubo_to_ising_fixed
 
-SOLVER_NAMES = {"milp", "cp_sat", "scip", "sa", "tabu", "gpu_sa", "qaoa"}
+SOLVER_NAMES = {"milp", "highs", "cp_sat", "scip", "sa", "tabu",
+                "gpu_sa", "sqaod", "qaoa"}
 
 
 def _has(module_name):
@@ -39,6 +40,7 @@ HAS_ORTOOLS = _has("ortools")
 HAS_PYSCIPOPT = _has("pyscipopt")
 HAS_DIMOD = _has("dimod")
 HAS_DWAVE = _has("dwave.samplers")
+HAS_SQAOD = _has("sqaod")
 HAS_CUDA = _cuda_available()
 
 NEED_PULP = pytest.mark.skipif(not HAS_PULP, reason="pulp not installed")
@@ -46,6 +48,7 @@ NEED_ORTOOLS = pytest.mark.skipif(not HAS_ORTOOLS, reason="ortools not installed
 NEED_PYSCIPOPT = pytest.mark.skipif(not HAS_PYSCIPOPT, reason="pyscipopt not installed")
 NEED_DIMOD = pytest.mark.skipif(not HAS_DIMOD, reason="dimod not installed")
 NEED_DWAVE = pytest.mark.skipif(not HAS_DWAVE, reason="dwave-samplers not installed")
+NEED_SQAOD = pytest.mark.skipif(not HAS_SQAOD, reason="sqaod not installed")
 NEED_CUDA = pytest.mark.skipif(not HAS_CUDA, reason="CUDA not available")
 
 
@@ -154,6 +157,29 @@ def test_milp_highs_backend():
 
 
 # ---------------------------------------------------------------------------
+# HiGHS (pulp.HiGHS interface — installed; CBC fallback)
+# ---------------------------------------------------------------------------
+
+@NEED_PULP
+def test_highs_solutions_valid():
+    Q, q, var_map = make_qubo()
+    k_max, top_k = 3, 6
+    solutions, wall_time, gap = solve("highs", Q, q, var_map,
+                                      k_max=k_max, top_k=top_k, time_limit=30)
+    check_solutions(solutions, Q, q, var_map, k_max, top_k)
+    assert wall_time > 0.0
+    assert gap is None
+
+
+@NEED_PULP
+def test_highs_top_k_respected():
+    Q, q, var_map = make_qubo(seed=7)
+    solutions, _, _ = solve("highs", Q, q, var_map, k_max=3, top_k=3,
+                            time_limit=30)
+    assert len(solutions) == 3
+
+
+# ---------------------------------------------------------------------------
 # CP-SAT (ortools — installed)
 # ---------------------------------------------------------------------------
 
@@ -173,6 +199,20 @@ def test_cp_sat_top_k_respected():
     Q, q, var_map = make_qubo(seed=23)
     solutions, _, _ = solve("cp_sat", Q, q, var_map, k_max=3, top_k=3, time_limit=30)
     assert len(solutions) == 3
+
+
+# ---------------------------------------------------------------------------
+# SQAOD — simulated quantum annealing (optional package; skip when missing)
+# ---------------------------------------------------------------------------
+
+@NEED_SQAOD
+def test_sqaod_solutions_valid():
+    Q, q, var_map = make_qubo()
+    k_max, top_k = 3, 6
+    solutions, wall_time, gap = solve("sqaod", Q, q, var_map,
+                                      k_max=k_max, top_k=top_k, time_limit=30)
+    check_solutions(solutions, Q, q, var_map, k_max, top_k, enforce_kmax=False)
+    assert gap is None
 
 
 # ---------------------------------------------------------------------------

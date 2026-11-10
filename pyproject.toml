@@ -41,17 +41,19 @@ cpsat = ["ortools>=9.8"]
 sa = ["dimod>=0.12"]
 tabu = ["dimod>=0.12", "dwave-tabu>=0.5"]
 gpu = ["torch>=2.0"]
+jit = ["numba>=0.60"]
 all = [
     "pulp>=2.7",
     "ortools>=9.8",
     "dimod>=0.12",
     "dwave-tabu>=0.5",
     "torch>=2.0",
+    "numba>=0.60",
 ]
 
 [project.urls]
-Homepage = "https://github.com/qubic-lcf/qubic-lcf"
-Documentation = "https://github.com/qubic-lcf/qubic-lcf#readme"
+Homepage = "https://github.com/laosian314-del/qubic-lcf"
+Documentation = "https://github.com/laosian314-del/qubic-lcf#readme"
 
 [tool.setuptools.packages.find]
 where = ["src"]
