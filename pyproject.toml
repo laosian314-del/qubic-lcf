@@ -1,0 +1,60 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "qubic-lcf"
+version = "0.1.0"
+description = "QUBO-based combinatorial linear-combination fitting for XAS/XANES spectra"
+readme = "README.md"
+license = { text = "MIT" }
+authors = [{ name = "QUBIC-LCF authors" }]
+requires-python = ">=3.10"
+keywords = [
+    "QUBO",
+    "XAS",
+    "XANES",
+    "linear combination fitting",
+    "combinatorial optimization",
+    "model selection",
+]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Science/Research",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Scientific/Engineering :: Chemistry",
+    "Topic :: Scientific/Engineering :: Physics",
+]
+dependencies = [
+    "numpy>=1.24",
+    "scipy>=1.10",
+    "scikit-learn>=1.3",
+]
+
+[project.optional-dependencies]
+milp = ["pulp>=2.7"]
+cpsat = ["ortools>=9.8"]
+sa = ["dimod>=0.12"]
+tabu = ["dimod>=0.12", "dwave-tabu>=0.5"]
+gpu = ["torch>=2.0"]
+all = [
+    "pulp>=2.7",
+    "ortools>=9.8",
+    "dimod>=0.12",
+    "dwave-tabu>=0.5",
+    "torch>=2.0",
+]
+
+[project.urls]
+Homepage = "https://github.com/qubic-lcf/qubic-lcf"
+Documentation = "https://github.com/qubic-lcf/qubic-lcf#readme"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

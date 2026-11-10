@@ -1,0 +1,16 @@
+# Core dependencies, pinned to the versions of the reference environment.
+numpy==2.2.6
+scipy==1.18.0
+scikit-learn==1.9.0
+
+# MILP solver backend (PuLP with the bundled CBC binary) — used by the
+# default `milp` solver. Also available via: pip install 'qubic-lcf[milp]'
+pulp==3.3.2
+
+# Optional solver backends (uncomment what you need):
+# ortools==9.14.6206        # cp_sat solver              — pip install 'qubic-lcf[cpsat]'
+# dimod==0.12.20            # sa solver                  — pip install 'qubic-lcf[sa]'
+# dwave-tabu==0.5.0         # tabu solver (with dimod)   — pip install 'qubic-lcf[tabu]'
+# torch>=2.0                # gpu_sa solver              — pip install 'qubic-lcf[gpu]'
+
+# Or install everything at once: pip install 'qubic-lcf[all]'
