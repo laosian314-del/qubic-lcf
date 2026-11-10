@@ -16,6 +16,10 @@ This is an internal/advanced layer of the stack
 
 and is NOT re-exported from the :mod:`qubic` top-level facade; the public
 surface is :class:`qubic.Problem` and the solver classes.
+
+.. note::
+   The optional numba/JIT acceleration was NOT used in the article;
+   article results were obtained with the pure NumPy code paths.
 """
 from __future__ import annotations
 
@@ -47,19 +51,24 @@ def _check_lambdas(encoding, lambdas):
         )
 
 
-def build_qubo(scheme, A, target, k, **penalties):
+def build_qubo(scheme, A, target, k, use_jit=False, **penalties):
     """Build ``(Q, q, var_map, decode)`` for one scheme (advanced entry).
 
     ``penalties`` must only name the scheme's penalty keywords (see
     :data:`PENALTY_KEYS`); missing keys fall back to the encoding builder
     defaults (``lam_sparse=1.0``, ``lam_link=5.0``, ``lam_antimix=5.0``).
+
+    ``use_jit=False`` (default) runs the pure-NumPy assembly path and never
+    imports numba; ``use_jit=True`` selects the opt-in numba ``@njit``
+    residual-assembly twin (identical ``Q`` / ``q``) and requires the
+    optional ``numba`` dependency.
     """
     if scheme not in SCHEMES:
         raise ValueError(
             f"Unknown scheme: {scheme}. Choose from {sorted(SCHEMES)}"
         )
     _check_lambdas(scheme, penalties)
-    return SCHEMES[scheme](A, target, k, **penalties)
+    return SCHEMES[scheme](A, target, k, use_jit=use_jit, **penalties)
 
 
 def resolve_lambdas(encoding, lambdas, A, y, k):
@@ -98,10 +107,11 @@ def resolve_lambdas(encoding, lambdas, A, y, k):
     return {name: float(value) for name, value in lam.items()}
 
 
-def compute_qubo(A, y, encoding, k, lambdas=None):
+def compute_qubo(A, y, encoding, k, lambdas=None, use_jit=False):
     """Build the QUBO ``(Q, q, var_map, decode)`` with resolved ``lambdas``.
 
     Combination of :func:`resolve_lambdas` and :func:`build_qubo`.
+    ``use_jit`` is forwarded to :func:`build_qubo`.
     """
     lam = resolve_lambdas(encoding, lambdas, A, y, k)
-    return build_qubo(encoding, A, y, k, **lam)
+    return build_qubo(encoding, A, y, k, use_jit=use_jit, **lam)

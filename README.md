@@ -157,17 +157,22 @@ pip install qubic-lcf
 pip install git+https://github.com/laosian314-del/qubic-lcf.git
 ```
 
-Selective extras:
+Selective extras (solver backends are all optional; each is loaded lazily
+only when you actually run it):
 
 ```bash
-pip install "qubic-lcf[milp]"     # CBC via PuLP
-pip install "qubic-lcf[cp-sat]"   # OR-Tools CP-SAT
+pip install "qubic-lcf[milp]"     # MILP via PuLP (CBC; also covers highs/HiGHS)
+pip install "qubic-lcf[cpsat]"    # OR-Tools CP-SAT
 pip install "qubic-lcf[scip]"     # PySCIPOpt
+pip install "qubic-lcf[sa]"       # simulated annealing (dimod)
+pip install "qubic-lcf[tabu]"     # tabu search (dwave-samplers)
+pip install "qubic-lcf[sqaod]"    # simulated quantum annealing (sqaod)
 pip install "qubic-lcf[gpu]"      # GPU simulated annealing (CUDA)
-pip install "qubic-lcf[qaoa]"     # QAOA (qubo-lib)
-pip install "qubic-lcf[sqaod]"    # simulated quantum annealing
+pip install "qubic-lcf[jit]"      # optional numba acceleration (see below)
 pip install "qubic-lcf[all]"      # everything
 ```
+
+`qaoa` needs no extra (it runs on `scipy` alone).
 
 ## Quickstart
 
@@ -203,6 +208,9 @@ res = task.solve(qubic.SA(restarts=20, T0=1.0))
 
 # 4. The alternative backend uses the exact same interface.
 res = task.solve(qubic.OMP())
+
+# 5. Opt-in numba acceleration of the whole run (optional):
+# res = task.solve(qubic.SA(restarts=20), use_jit=True)
 ```
 
 The pipeline stage chain is: XANES input → QUBO solver (MILP/SA) → top-K
@@ -245,7 +253,9 @@ src/qubic/
     alternative.py       # alternative backend (replaces the former baselines.py)
     pipeline.py          # refinement: NNLS + tau cutoff + BIC selection
     pyfitit_api.py       # tryallmixtures (mirrors pyfitit.mixture.tryallmixtures)
+    _accel.py            # lazy numba loading (opt-in use_jit)
     solvers/             # solver registry: milp, highs, cp_sat, scip, sa, ...
+benchmarks/              # timing scripts: default path vs use_jit
 examples/
     quickstart.py        # end-to-end synthetic example
     pyfitit_integration.py
@@ -256,11 +266,56 @@ docs/assets/             # figures
 Note: `src/qubic/alternative.py` replaces `baselines.py`; the old name is no
 longer used.
 
+## Optional numba acceleration (not used in the article)
+
+Every hot path has an **opt-in** numba-accelerated twin. The default path is
+the pure-NumPy reference code and **never imports numba** ("don't pay for
+what you don't use"); `use_jit=True` on a run switches the whole pipeline —
+QUBO assembly, the solver's own kernel (SA/Tabu/QAOA) and the NNLS
+refinement — to the accelerated kernels:
+
+```python
+res = task.solve(qubic.SA(restarts=20), use_jit=True)   # native numba SA kernel
+res = task.solve(qubic.OMP(), use_jit=True)             # greedy kernels
+```
+
+Install it with `pip install "qubic-lcf[jit]"` (or just `pip install numba`).
+Without numba, `use_jit=True` raises a clear `ImportError`. The twins are
+numerically equivalent: the QUBO assembly and the greedy kernels are bitwise
+identical between the two paths, the batched NNLS refinement matches
+`scipy.optimize.nnls` to ~1e-8, and the QAOA state evolution matches the
+`scipy.expm` reference to ~1e-11 (asserted in `tests/test_jit_*.py`).
+
+**The numba/JIT acceleration was NOT used in the article** — all article
+results were obtained with the pure NumPy code paths. Timings below were
+measured on a single CPU core of the development machine (reproduce with the
+scripts in `benchmarks/`):
+
+- QUBO assembly (m=300 points, N=324 references, k=10): 2–3× over the
+  vectorized default (≈6–12 ms → ≈3–5 ms across schemes). The vectorized
+  reference path itself is 36–55× faster than the previous loop-based
+  assembly.
+- Native SA / tabu kernels (`use_jit=True`; they work without `dimod`):
+  200–360× over their pure-NumPy twins at M=30–100 variables (kernel level);
+  end-to-end `solve(..., use_jit=True)` ≈ 0.01–0.1 s at M=100.
+- Greedy MP/OMP selection: 2–20× on the greedy-path kernels, 1.1–1.9×
+  end-to-end (the shared BIC/NNLS refinement stage dominates at small sizes).
+- Batched NNLS refinement (100 candidate supports): ≈2× over the
+  per-candidate `scipy.optimize.nnls` loop (≈52 µs → 27–34 µs per candidate).
+- QAOA: analytic parameterized gates + numba are 1.6–2.1× faster than the
+  legacy `scipy.expm` evolution at n=10–12 qubits. The legacy evolution
+  applied per-qubit 2×2 unitaries — not a full 2^n×2^n matrix exponential —
+  so the win here is modest, not orders of magnitude.
+
+The first `use_jit=True` call pays a one-time numba compilation cost
+(~0.4–0.6 s per kernel signature, cached afterwards).
+
 ## Development
 
 ```bash
 pip install -e ".[all]"
 pytest
+python benchmarks/bench_qubo_build.py   # default vs use_jit timings
 ```
 
 ## Links

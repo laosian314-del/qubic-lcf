@@ -11,9 +11,11 @@ generation, post-processing, BIC) are kept.
 
 Methods (each returns the same :class:`AlternativeResult` dict)
 --------------------------------------------------------------
-Greedy forward selection (MP/OMP) family:
-- ``omp_bic``        -- sklearn ``OrthogonalMatchingPursuit`` with
-   ``n_nonzero_coefs=k`` for k = 1..k_max -> min-BIC.
+Greedy forward selection (MP/OMP) family (JIT-accelerable, see below):
+- ``omp_bic``        -- Orthogonal Matching Pursuit: greedy forward selection
+   with incremental least-squares refit (rank-1 Cholesky updates of the
+   ``A^T A`` Gram matrix); support prefixes of the greedy path for
+   k = 1..k_max -> min-BIC.
 - ``mp_bic``         -- Matching Pursuit without orthogonalization: at step t
    pick the column maximizing |<r, a_j>|/||a_j||, update
    r <- r - (<r,a_j>/||a_j||^2) a_j; support after each step -> min-BIC.
@@ -42,17 +44,28 @@ Every method returns :class:`AlternativeResult` -- ``{'method', 'selected',
 'concentrations', 'k_pred', 'bic', 'rss'}`` with a sorted support; ``bic``
 is None when no candidate produced a non-empty support (then
 ``rss = ||y||^2``).
+
+Opt-in numba acceleration (greedy forward selection family)
+-----------------------------------------------------------
+:func:`mp_bic` / :func:`omp_bic` (and their shared greedy-path helpers) take
+``use_jit=False``.  The default runs the pure-NumPy reference kernels and
+never imports numba; ``use_jit=True`` runs the numerically equivalent
+``@njit`` twins (optional ``numba`` dependency: ``pip install
+"qubic-lcf[jit]"``).  Both twins implement the same deterministic greedy
+selection: identical selected supports, allclose coefficients.
+
+The optional numba/JIT acceleration was NOT used in the article; article results were obtained with the pure NumPy code paths.
 """
 from __future__ import annotations
 
 import itertools
-import warnings
 from typing import TypedDict
 
 import numpy as np
 from scipy.optimize import nnls
-from sklearn.linear_model import Lasso, OrthogonalMatchingPursuit
+from sklearn.linear_model import Lasso
 
+from ._accel import require_numba
 from .pipeline import EPS_RSS, compute_bic
 
 
@@ -83,8 +96,9 @@ LASSO_MAX_ITER = 50000
 ALTERNATIVE_METHODS = ('omp_bic', 'mp_bic', 'lasso_positive', 'topk_corr_bic',
                        'oracle_exact')
 
-# Count of suppressed sklearn OMP "ended prematurely due to linear
-# dependence" warnings (kept from the original script for honest logging).
+# Count of suppressed "ended prematurely due to linear dependence" conditions
+# of the greedy OMP path (kept from the original script for honest logging):
+# one per candidate k that a premature greedy-path stop would have skipped.
 _OMP_WARN_COUNT = 0
 
 
@@ -170,47 +184,346 @@ def _result(method, best, y):
 
 
 # --------------------------------------------------------------------------
-# Methods
+# Greedy forward selection kernels (twin implementations)
 # --------------------------------------------------------------------------
-def omp_bic(A, y, k_max=15):
-    """Orthogonal Matching Pursuit (sklearn), k = 1..k_max -> min-BIC."""
-    global _OMP_WARN_COUNT
-    A = np.asarray(A, dtype=float)
-    y = np.asarray(y, dtype=float).ravel()
-    cands = []
-    for k in range(1, min(k_max, A.shape[1]) + 1):
-        omp = OrthogonalMatchingPursuit(n_nonzero_coefs=k, fit_intercept=False)
-        with warnings.catch_warnings(record=True) as wlist:
-            warnings.simplefilter('always')
-            omp.fit(A, y)
-        _OMP_WARN_COUNT += sum(
-            1 for w in wlist if 'prematurely' in str(w.message).lower())
-        cols = [int(i) for i in np.flatnonzero(omp.coef_)]
-        if cols:
-            cands.append(cols)
-    return _result('omp_bic', _select_by_bic(A, y, cands), y)
+# The hot loops of the greedy forward selection family are written twice and
+# selected with ``use_jit`` on :func:`mp_bic` / :func:`omp_bic` (and their
+# shared greedy-path helpers):
+#
+#   _mp_path_np  / _mp_path_jit   -- MP path (no orthogonalization): the
+#                                    correlation computation |A^T r|/||a_j||,
+#                                    the per-step atom selection and the
+#                                    rank-1 residual update.
+#   _omp_path_np / _omp_path_jit  -- OMP path: the Gram/correlation
+#                                    computation (A^T A, A^T y), the per-step
+#                                    atom selection over the correlations and
+#                                    the rank-1 Cholesky / incremental
+#                                    least-squares updates across steps.
+#
+# The pure-NumPy reference twin is the default path (``use_jit=False``, no
+# numba import ever); the ``@njit`` twin runs only on ``use_jit=True``.  Both
+# twins implement the same deterministic algorithm: identical selected
+# supports, allclose coefficients.
+#
+# The optional numba/JIT acceleration was NOT used in the article; article results were obtained with the pure NumPy code paths.
+
+#: ``np.finfo(float).eps`` guard of the OMP premature-stop checks (the
+#: sklearn OMP ``min_float`` value, kept for identical stopping rules).
+MIN_FLOAT = float(np.finfo(np.float64).eps)
 
 
-def mp_bic(A, y, k_max=15):
-    """Matching Pursuit without orthogonalization, k = 1..k_max -> min-BIC."""
-    A = np.asarray(A, dtype=float)
-    y = np.asarray(y, dtype=float).ravel()
-    k_max_eff = min(k_max, A.shape[1])
-    r = y.astype(float).copy()
+def _mp_path_np(A, y, k_max_eff):
+    """Pure-NumPy reference kernel: greedy MP path (default, ``use_jit=False``).
+
+    At step t pick ``j = argmax_j |<r, a_j>| / ||a_j||`` over the not-yet
+    chosen columns (first maximum wins, as ``np.argmax``) and apply the
+    rank-1 residual update ``r <- r - (<r, a_j>/||a_j||^2) a_j``.
+
+    Returns ``(order, step_alpha, norms2)``: the selected column indices in
+    selection order (length ``k_max_eff``), the rank-1 update coefficient of
+    each step, and the squared column norms ``diag(A^T A)``.
+    """
     norms2 = np.sum(A ** 2, axis=0)
-    if not (norms2 > 0).all():
-        raise ValueError('zero column in A')
     norms = np.sqrt(norms2)
+    r = y.astype(float).copy()
+    order = np.empty(k_max_eff, dtype=np.int64)
+    step_alpha = np.empty(k_max_eff, dtype=float)
     chosen = []
-    cands = []
-    for _ in range(k_max_eff):
+    for t in range(k_max_eff):
         ip = np.abs(A.T @ r) / norms
         if chosen:
             ip[np.asarray(chosen, dtype=int)] = -np.inf
         j = int(np.argmax(ip))
         chosen.append(j)
-        r = r - (float(A[:, j] @ r) / norms2[j]) * A[:, j]
-        cands.append(list(chosen))
+        order[t] = j
+        alpha = float(A[:, j] @ r) / norms2[j]
+        step_alpha[t] = alpha
+        r = r - alpha * A[:, j]
+    return order, step_alpha, norms2
+
+
+def _omp_path_np(A, y, k_max_eff):
+    """Pure-NumPy reference kernel: greedy OMP path (default, ``use_jit=False``).
+
+    Greedy forward selection with incremental least-squares refit: compute
+    the correlations ``c = A^T y`` and, per selected atom, its Gram row of
+    ``A^T A`` (deferred-Gram OMP -- the same values as the full Gram, work
+    O(k_max*K*N) instead of O(K*N^2)); at step t pick
+    ``lam = argmax_j |cov_j|`` over ``cov = c - G[:, :t] @ gamma_t``
+    (``gamma_t`` = least-squares coefficients on the selected atoms, from
+    rank-1 Cholesky updates of ``G``), and stop early on a vanishing
+    correlation or linearly dependent atoms (sklearn OMP stopping rules).
+
+    Returns ``(order, coefs_path, n_active)``: the selected column indices in
+    selection order (length ``n_active``), the per-step full-length
+    least-squares coefficient vectors (row ``t`` holds the solution on the
+    first ``t + 1`` atoms), and the number of atoms selected before any
+    premature stop.
+    """
+    N = A.shape[1]
+    c = A.T @ y
+    order = np.empty(k_max_eff, dtype=np.int64)
+    coefs_path = np.zeros((k_max_eff, N), dtype=float)
+    gram_rows = np.zeros((k_max_eff, N), dtype=float)
+    selected = np.zeros(N, dtype=bool)
+    L = np.zeros((k_max_eff, k_max_eff), dtype=float)
+    cov = c.copy()
+    n_active = 0
+    for t in range(k_max_eff):
+        lam = int(np.argmax(np.abs(cov)))
+        if selected[lam] or cov[lam] ** 2 < MIN_FLOAT:
+            break  # premature stop: vanishing correlation / re-selection
+        grow = A.T @ A[:, lam]  # Gram row of the newly selected atom
+        if t == 0:
+            L[0, 0] = np.sqrt(grow[lam])
+        else:
+            w = grow[order[:t]]
+            z = np.empty(t, dtype=float)
+            for j in range(t):
+                z[j] = (w[j] - L[j, :j] @ z[:j]) / L[j, j]
+            Lkk = float(grow[lam]) - float(z @ z)
+            if Lkk <= MIN_FLOAT:
+                break  # premature stop: linearly dependent atoms
+            L[t, :t] = z
+            L[t, t] = np.sqrt(Lkk)
+        gram_rows[n_active] = grow
+        selected[lam] = True
+        order[n_active] = lam
+        n_active += 1
+        # incremental least squares: solve L L^T gamma = c[order[:n_active]]
+        u = np.empty(n_active, dtype=float)
+        for j in range(n_active):
+            u[j] = (c[order[j]] - L[j, :j] @ u[:j]) / L[j, j]
+        gamma = np.empty(n_active, dtype=float)
+        for j in range(n_active - 1, -1, -1):
+            gamma[j] = (u[j] - L[j + 1:n_active, j] @ gamma[j + 1:]) / L[j, j]
+        cov = c - gram_rows[:n_active].T @ gamma
+        coefs_path[n_active - 1, order[:n_active]] = gamma
+    return order, coefs_path, n_active
+
+
+_mp_kernel = None
+_omp_kernel = None
+
+
+def _get_mp_kernel(nb):
+    """Build (once) and return the ``@njit`` twin of :func:`_mp_path_np`."""
+    global _mp_kernel
+    if _mp_kernel is None:
+        @nb.njit(cache=True)
+        def mp_path(A, y, k_max_eff):
+            K, N = A.shape
+            norms2 = np.zeros(N, dtype=np.float64)
+            for i in range(K):
+                for j in range(N):
+                    aij = A[i, j]
+                    norms2[j] += aij * aij
+            norms = np.empty(N, dtype=np.float64)
+            for j in range(N):
+                norms[j] = np.sqrt(norms2[j])
+            r = y.copy()
+            order = np.empty(k_max_eff, dtype=np.int64)
+            step_alpha = np.empty(k_max_eff, dtype=np.float64)
+            chosen = np.zeros(N, dtype=np.uint8)
+            dots = np.empty(N, dtype=np.float64)
+            for t in range(k_max_eff):
+                # hot loop: correlations |<r, a_j>| = |A^T r| + atom selection
+                for j in range(N):
+                    dots[j] = 0.0
+                for i in range(K):
+                    ri = r[i]
+                    for j in range(N):
+                        dots[j] += A[i, j] * ri
+                best_j = -1
+                best_v = -np.inf
+                for j in range(N):
+                    if chosen[j] != 0:
+                        continue
+                    v = abs(dots[j]) / norms[j]
+                    if v > best_v:
+                        best_v = v
+                        best_j = j
+                j = best_j
+                chosen[j] = 1
+                order[t] = j
+                alpha = dots[j] / norms2[j]
+                step_alpha[t] = alpha
+                for i in range(K):
+                    r[i] -= alpha * A[i, j]
+            return order, step_alpha, norms2
+        _mp_kernel = mp_path
+    return _mp_kernel
+
+
+def _get_omp_kernel(nb):
+    """Build (once) and return the ``@njit`` twin of :func:`_omp_path_np`."""
+    global _omp_kernel
+    if _omp_kernel is None:
+        @nb.njit(cache=True)
+        def omp_path(A, y, k_max_eff):
+            K, N = A.shape
+            # hot loop 1: correlations A^T y and, per selected atom, its Gram
+            # row of A^T A (deferred-Gram OMP: same values as the full Gram)
+            c = np.zeros(N, dtype=np.float64)
+            for i in range(K):
+                yi = y[i]
+                for j in range(N):
+                    c[j] += A[i, j] * yi
+            order = np.empty(k_max_eff, dtype=np.int64)
+            coefs_path = np.zeros((k_max_eff, N), dtype=np.float64)
+            gram_rows = np.zeros((k_max_eff, N), dtype=np.float64)
+            selected = np.zeros(N, dtype=np.uint8)
+            L = np.zeros((k_max_eff, k_max_eff), dtype=np.float64)
+            cov = c.copy()
+            n_active = 0
+            for t in range(k_max_eff):
+                # hot loop 2: per-step atom selection over the correlations
+                lam = -1
+                best = -np.inf
+                for j in range(N):
+                    v = abs(cov[j])
+                    if v > best:
+                        best = v
+                        lam = j
+                if selected[lam] != 0 or cov[lam] * cov[lam] < MIN_FLOAT:
+                    break  # premature stop: vanishing correlation / re-selection
+                grow = np.zeros(N, dtype=np.float64)  # Gram row of a_lam
+                for i in range(K):
+                    ali = A[i, lam]
+                    for j in range(N):
+                        grow[j] += ali * A[i, j]
+                # hot loop 3: rank-1 Cholesky + incremental least squares
+                if t == 0:
+                    L[0, 0] = np.sqrt(grow[lam])
+                else:
+                    z = np.empty(t, dtype=np.float64)
+                    for j in range(t):
+                        s = grow[order[j]]
+                        for m in range(j):
+                            s -= L[j, m] * z[m]
+                        z[j] = s / L[j, j]
+                    v = 0.0
+                    for j in range(t):
+                        v += z[j] * z[j]
+                    Lkk = grow[lam] - v
+                    if Lkk <= MIN_FLOAT:
+                        break  # premature stop: linearly dependent atoms
+                    for j in range(t):
+                        L[t, j] = z[j]
+                    L[t, t] = np.sqrt(Lkk)
+                for j in range(N):
+                    gram_rows[n_active, j] = grow[j]
+                selected[lam] = 1
+                order[n_active] = lam
+                n_active += 1
+                u = np.empty(n_active, dtype=np.float64)
+                for j in range(n_active):
+                    s = c[order[j]]
+                    for m in range(j):
+                        s -= L[j, m] * u[m]
+                    u[j] = s / L[j, j]
+                gamma = np.empty(n_active, dtype=np.float64)
+                for j in range(n_active - 1, -1, -1):
+                    s = u[j]
+                    for m in range(j + 1, n_active):
+                        s -= L[m, j] * gamma[m]
+                    gamma[j] = s / L[j, j]
+                for l in range(N):
+                    s = 0.0
+                    for j in range(n_active):
+                        s += gram_rows[j, l] * gamma[j]
+                    cov[l] = c[l] - s
+                for j in range(n_active):
+                    coefs_path[n_active - 1, order[j]] = gamma[j]
+            return order, coefs_path, n_active
+        _omp_kernel = omp_path
+    return _omp_kernel
+
+
+def _mp_path_jit(A, y, k_max_eff):
+    """numba ``@njit`` twin of :func:`_mp_path_np` (opt-in ``use_jit=True``)."""
+    nb = require_numba()
+    kernel = _get_mp_kernel(nb)
+    return kernel(np.ascontiguousarray(A, dtype=np.float64),
+                  np.ascontiguousarray(y, dtype=np.float64), k_max_eff)
+
+
+def _omp_path_jit(A, y, k_max_eff):
+    """numba ``@njit`` twin of :func:`_omp_path_np` (opt-in ``use_jit=True``)."""
+    nb = require_numba()
+    kernel = _get_omp_kernel(nb)
+    return kernel(np.ascontiguousarray(A, dtype=np.float64),
+                  np.ascontiguousarray(y, dtype=np.float64), k_max_eff)
+
+
+def _mp_greedy_path(A, y, k_max_eff, use_jit=False):
+    """Greedy MP path via the twin selected by ``use_jit``.
+
+    Shared helper of :func:`mp_bic`; returns ``(order, step_alpha, norms2)``
+    exactly as :func:`_mp_path_np`.
+    """
+    if use_jit:
+        return _mp_path_jit(A, y, k_max_eff)
+    return _mp_path_np(A, y, k_max_eff)
+
+
+def _omp_greedy_path(A, y, k_max_eff, use_jit=False):
+    """Greedy OMP path via the twin selected by ``use_jit``.
+
+    Shared helper of :func:`omp_bic`; returns ``(order, coefs_path,
+    n_active)`` exactly as :func:`_omp_path_np`.
+    """
+    if use_jit:
+        return _omp_path_jit(A, y, k_max_eff)
+    return _omp_path_np(A, y, k_max_eff)
+
+
+# --------------------------------------------------------------------------
+# Methods
+# --------------------------------------------------------------------------
+def omp_bic(A, y, k_max=15, use_jit=False):
+    """Orthogonal Matching Pursuit (greedy), k = 1..k_max -> min-BIC.
+
+    The candidate supports are the prefixes of one greedy forward-selection
+    path with incremental least-squares refit (equivalent to the per-k OMP
+    fits of the original code; premature stops cut the path short exactly as
+    before).  ``use_jit`` selects the numba ``@njit`` twin of the greedy-path
+    kernel (the default pure-NumPy twin preserves current behavior).
+    """
+    global _OMP_WARN_COUNT
+    A = np.asarray(A, dtype=float)
+    y = np.asarray(y, dtype=float).ravel()
+    k_max_eff = min(k_max, A.shape[1])
+    if k_max_eff <= 0:
+        return _result('omp_bic', None, y)
+    order, _coefs, n_active = _omp_greedy_path(A, y, k_max_eff,
+                                               use_jit=use_jit)
+    if n_active < k_max_eff:
+        # premature stop: the original per-k fits warned once per k beyond
+        # the stop -- keep that accounting honest
+        _OMP_WARN_COUNT += k_max_eff - n_active
+    cands = [[int(i) for i in sorted(order[:s])]
+             for s in range(1, n_active + 1)]
+    return _result('omp_bic', _select_by_bic(A, y, cands), y)
+
+
+def mp_bic(A, y, k_max=15, use_jit=False):
+    """Matching Pursuit without orthogonalization, k = 1..k_max -> min-BIC.
+
+    ``use_jit`` selects the numba ``@njit`` twin of the greedy-path kernel
+    (the default pure-NumPy twin preserves current behavior).
+    """
+    A = np.asarray(A, dtype=float)
+    y = np.asarray(y, dtype=float).ravel()
+    k_max_eff = min(k_max, A.shape[1])
+    norms2 = np.sum(A ** 2, axis=0)
+    if not (norms2 > 0).all():
+        raise ValueError('zero column in A')
+    if k_max_eff <= 0:
+        return _result('mp_bic', None, y)
+    order, _alphas, _norms2 = _mp_greedy_path(A, y, k_max_eff,
+                                              use_jit=use_jit)
+    cands = [[int(i) for i in order[:s]] for s in range(1, k_max_eff + 1)]
     return _result('mp_bic', _select_by_bic(A, y, cands), y)
 
 
@@ -333,16 +646,17 @@ def oracle_exact(A, y, max_n=15):
     }
 
 
-def run_all_alternative(A, y, k_max=15):
+def run_all_alternative(A, y, k_max=15, use_jit=False):
     """Run every alternative-backend method on ``(A, y)``.
 
     Returns ``{name: result_dict}`` with the five keys of
     :data:`ALTERNATIVE_METHODS`.  ``oracle_exact`` is exponential and raises
-    ValueError when ``A.shape[1] > 15``.
+    ValueError when ``A.shape[1] > 15``.  ``use_jit`` is forwarded to the
+    greedy forward selection family (:func:`omp_bic`, :func:`mp_bic`).
     """
     return {
-        'omp_bic': omp_bic(A, y, k_max=k_max),
-        'mp_bic': mp_bic(A, y, k_max=k_max),
+        'omp_bic': omp_bic(A, y, k_max=k_max, use_jit=use_jit),
+        'mp_bic': mp_bic(A, y, k_max=k_max, use_jit=use_jit),
         'lasso_positive': lasso_positive(A, y),
         'topk_corr_bic': topk_corr_bic(A, y, k_max=k_max),
         'oracle_exact': oracle_exact(A, y),

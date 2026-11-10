@@ -44,16 +44,22 @@ class Solver(abc.ABC):
     A solver bundles its own settings; the task data lives in
     :class:`qubic.Problem`.  The internal contract is
     ``Problem.solve(solver) -> Result``: ``Problem.solve`` delegates to
-    ``solver._run(problem, top_k)``.  Solver objects are stateless with
-    respect to problems and can be reused across problems.
+    ``solver._run(problem, top_k, use_jit)``.  Solver objects are stateless
+    with respect to problems and can be reused across problems.  ``use_jit``
+    opts into the optional numba acceleration of the run (NOT used in the
+    article); the default path never imports numba.
     """
 
     #: Method registry name recorded in :attr:`qubic.Result.method`.
     name = ''
 
     @abc.abstractmethod
-    def _run(self, problem, top_k):
-        """Solve ``problem`` and return a :class:`qubic.Result`."""
+    def _run(self, problem, top_k, use_jit=False):
+        """Solve ``problem`` and return a :class:`qubic.Result`.
+
+        ``use_jit`` selects the optional numba kernels where they exist
+        (QUBO assembly, native SA/Tabu/QAOA kernels, NNLS refinement).
+        """
 
 
 class QuboSolver(Solver):
@@ -106,21 +112,33 @@ class QuboSolver(Solver):
         """Low-level solver-specific kwargs forwarded to qubic.solvers.solve."""
         return {}
 
-    def _run(self, problem, top_k):
+    def _run(self, problem, top_k, use_jit=False):
+        import inspect
+
         from . import solvers as _lowlevel
 
-        Q, q, var_map, decode = problem._get_qubo(self.encoding, self.lambdas)
+        Q, q, var_map, decode = problem._get_qubo(
+            self.encoding, self.lambdas, use_jit=use_jit)
+        backend_kwargs = dict(self._settings())
+        # Forward use_jit only to backends with a native accelerated kernel
+        # (sa/tabu/qaoa); the others simply do not accept the keyword.
+        try:
+            if 'use_jit' in inspect.signature(
+                    _lowlevel.SOLVERS[self.solver_name]).parameters:
+                backend_kwargs['use_jit'] = use_jit
+        except (TypeError, ValueError):
+            pass
         solutions, wall_time, gap = _lowlevel.solve(
             self.solver_name, Q, q, var_map,
             k_max=problem.solver_k_bound, top_k=top_k,
-            time_limit=self.time_limit, **self._settings())
+            time_limit=self.time_limit, **backend_kwargs)
 
         # Decode -> refine (NNLS + tau cutoff) -> BIC.
         candidates = []
         for sample, energy in solutions:
             sel, _raw_conc = decode(sample)
             refined = refine_candidate(
-                problem._Aw, problem._yw, sel, problem.tau)
+                problem._Aw, problem._yw, sel, problem.tau, use_jit=use_jit)
             if refined is None:
                 continue
             sel_f, conc_f, rss, bic = refined
@@ -140,7 +158,7 @@ class QuboSolver(Solver):
         if not candidates:
             # Fallback: NNLS on the full library (run_pipeline step 5).
             sel_f, conc_f, rss, bic = full_library_candidate(
-                problem._Aw, problem._yw, problem.tau)
+                problem._Aw, problem._yw, problem.tau, use_jit=use_jit)
             candidates.append({
                 'selected': tuple(int(i) for i in sel_f),
                 'concentrations': conc_f,
@@ -400,13 +418,13 @@ class AlternativeSolver(Solver):
     forwards its own settings to the underlying method.
     """
 
-    def _method(self, A, y, problem):
+    def _method(self, A, y, problem, use_jit=False):
         """Run the underlying alternative method; return its result dict."""
         raise NotImplementedError
 
-    def _run(self, problem, top_k):
+    def _run(self, problem, top_k, use_jit=False):
         t0 = time.time()
-        res = self._method(problem._Aw, problem._yw, problem)
+        res = self._method(problem._Aw, problem._yw, problem, use_jit=use_jit)
         wall_time = time.time() - t0
         selected = tuple(int(i) for i in res['selected'])
         concentrations = np.asarray(res['concentrations'], dtype=float)
@@ -436,10 +454,10 @@ class MP(AlternativeSolver):
     def __init__(self, k_max=None):
         self.k_max = k_max
 
-    def _method(self, A, y, problem):
+    def _method(self, A, y, problem, use_jit=False):
         from .alternative import mp_bic
         k_max = self.k_max if self.k_max is not None else (problem.k_max or 15)
-        return mp_bic(A, y, k_max=k_max)
+        return mp_bic(A, y, k_max=k_max, use_jit=use_jit)
 
 
 class OMP(AlternativeSolver):
@@ -454,10 +472,10 @@ class OMP(AlternativeSolver):
     def __init__(self, k_max=None):
         self.k_max = k_max
 
-    def _method(self, A, y, problem):
+    def _method(self, A, y, problem, use_jit=False):
         from .alternative import omp_bic
         k_max = self.k_max if self.k_max is not None else (problem.k_max or 15)
-        return omp_bic(A, y, k_max=k_max)
+        return omp_bic(A, y, k_max=k_max, use_jit=use_jit)
 
 
 class Lasso(AlternativeSolver):
@@ -472,7 +490,9 @@ class Lasso(AlternativeSolver):
     def __init__(self, alphas=None):
         self.alphas = alphas
 
-    def _method(self, A, y, problem):
+    def _method(self, A, y, problem, use_jit=False):
+        # No jit kernel for the alpha-grid LASSO; use_jit is accepted and
+        # ignored ("don't pay for what you don't use").
         from .alternative import lasso_positive
         return lasso_positive(A, y, alphas=self.alphas)
 
@@ -489,7 +509,9 @@ class TopK(AlternativeSolver):
     def __init__(self, k_max=None):
         self.k_max = k_max
 
-    def _method(self, A, y, problem):
+    def _method(self, A, y, problem, use_jit=False):
+        # No jit kernel for the correlation ranking; use_jit is accepted and
+        # ignored ("don't pay for what you don't use").
         from .alternative import topk_corr_bic
         k_max = self.k_max if self.k_max is not None else (problem.k_max or 15)
         return topk_corr_bic(A, y, k_max=k_max)
@@ -506,6 +528,8 @@ class Oracle(AlternativeSolver):
     def __init__(self, max_n=15):
         self.max_n = max_n
 
-    def _method(self, A, y, problem):
+    def _method(self, A, y, problem, use_jit=False):
+        # The exhaustive oracle is N-limited brute force; use_jit is
+        # accepted and ignored ("don't pay for what you don't use").
         from .alternative import oracle_exact
         return oracle_exact(A, y, max_n=self.max_n)

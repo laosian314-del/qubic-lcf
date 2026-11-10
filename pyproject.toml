@@ -38,16 +38,20 @@ dependencies = [
 [project.optional-dependencies]
 milp = ["pulp>=2.7"]
 cpsat = ["ortools>=9.8"]
+scip = ["pyscipopt>=4.3"]
 sa = ["dimod>=0.12"]
-tabu = ["dimod>=0.12", "dwave-tabu>=0.5"]
+tabu = ["dimod>=0.12", "dwave-samplers>=1.1"]
 gpu = ["torch>=2.0"]
+sqaod = ["sqaod>=0.4"]
 jit = ["numba>=0.60"]
 all = [
     "pulp>=2.7",
     "ortools>=9.8",
+    "pyscipopt>=4.3",
     "dimod>=0.12",
-    "dwave-tabu>=0.5",
+    "dwave-samplers>=1.1",
     "torch>=2.0",
+    "sqaod>=0.4",
     "numba>=0.60",
 ]
 

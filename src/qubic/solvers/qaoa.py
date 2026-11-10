@@ -14,17 +14,33 @@ Algorithm:
   3. Optimize (gamma, beta) via COBYLA to minimize <psi|H_C|psi>
   4. Sample the final state -> bitstrings -> top_k candidate solutions
 
-The cost unitary is applied as an exact phase on the statevector diagonal and
-the mixer unitary is built with ``scipy.linalg.expm`` (single-qubit X
-rotations). Exact statevector simulation is limited to MAX_QUBITS = 15 qubits.
+State evolution uses analytic parameterized gate application — no matrix
+exponentials are built or factorized. The cost unitary is an exact
+per-amplitude phase and the mixer unitary is a product of single-qubit X
+rotations ``e^{-i beta X_i} = cos(beta) I - i sin(beta) X_i`` applied as
+two-level rotations directly on the statevector (linear in the state
+dimension per gate, O(P n 2^n) in total). The previous
+``scipy.linalg.expm``-based evolution is kept as :func:`final_state_expm`
+for validation (parity tests) and benchmarking.
+
+The evolution has two twins selected by ``use_jit``: a pure-NumPy reference
+(:func:`_evolve_numpy`, the default path) and a numba ``@njit`` twin of the
+state-evolution inner loop (:func:`_build_jit_evolve`, opt-in via
+``use_jit=True`` on :func:`final_state`, :func:`qaoa_expectation`,
+:func:`solve_qaoa` and :func:`solve`). The twins consume bitwise-identical
+precomputed gate factors and perform the same scalar arithmetic, so they
+produce bitwise-identical statevectors.
+
+The optional numba/JIT acceleration was NOT used in the article; article
+results were obtained with the pure NumPy code paths.
 
 Public API:
     qubo_to_ising_fixed(Q, q) -> (h, J, const)   (corrected mapping)
     ising_energy(s, h, J, const) -> float
-    solve_qaoa(Q, q, var_map, ...) -> dict
+    solve_qaoa(Q, q, var_map, ..., use_jit=False) -> dict
 
 Unified API:
-    solve(Q, q, var_map, k_max=15, top_k=20, time_limit=None, **kwargs)
+    solve(Q, q, var_map, k_max=15, top_k=20, time_limit=None, use_jit=False, **kwargs)
         -> (solutions, wall_time, gap=None)
 """
 from __future__ import annotations
@@ -33,6 +49,7 @@ import time
 
 import numpy as np
 
+from .._accel import require_numba
 from . import base
 from .base import get_selection
 
@@ -69,7 +86,6 @@ def ising_energy(s, h, J, const):
             val += J[i, j] * s[i] * s[j]
     return val
 
-
 # ---------------------------------------------------------------- QAOA core
 def cost_diagonal(h, J):
     """Diagonal of H_C in the computational basis (spin s_i = 1 - 2*x_i)."""
@@ -85,12 +101,165 @@ def cost_diagonal(h, J):
     return diag
 
 
-def final_state(gammas, betas, diag):
-    """QAOA statevector after p = len(gammas) layers (ported from run_pilot.py).
+def _evolve_numpy(re, im, ph_re, ph_im, cos_betas, sin_betas, n_qubits):
+    """Pure-NumPy analytic gate application (default twin), in place.
 
-    Cost evolution e^{-i gamma H_C} is an exact phase on the diagonal; the
-    mixer e^{-i beta H_M} = prod_i e^{-i beta X_i} uses the scipy.linalg.expm
-    single-qubit unitary.
+    Applies p = ph_re.shape[0] QAOA layers to the real/imaginary parts of the
+    statevector ``re + i*im`` (both length 2**n, contiguous float64):
+
+    * cost layer:   psi[j] *= exp(-i gamma diag[j]) (per-amplitude phase
+      given as precomputed real factors ph_re, ph_im),
+    * mixer layer:  for each qubit i, the two-level rotation
+      ``cos(beta) I - i sin(beta) X_i`` applied to every (j, j^(1<<i)) pair:
+      ``new_a = c*a + s*(i*b),  new_b = c*b + s*(i*a)`` in explicit real
+      arithmetic (gather of the flipped amplitudes, in-place update).
+
+    The numba twin :func:`_build_jit_evolve` performs the same scalar
+    operations on the same precomputed factors, so both twins agree bitwise.
+    """
+    dim = re.size
+    idx_all = np.arange(dim)
+    flips = [idx_all ^ (1 << i) for i in range(n_qubits)]
+    for layer in range(ph_re.shape[0]):
+        pr = ph_re[layer]
+        pi = ph_im[layer]
+        nr = re * pr - im * pi
+        ni = re * pi + im * pr
+        re[:] = nr
+        im[:] = ni
+        c = cos_betas[layer]
+        s = sin_betas[layer]
+        for i in range(n_qubits):
+            flipped = flips[i]
+            re_f = re[flipped]   # snapshot of the old flipped amplitudes
+            im_f = im[flipped]
+            re *= c
+            re += s * im_f
+            im *= c
+            im -= s * re_f
+    return re, im
+
+
+def _build_jit_evolve(nb):
+    """Build the numba ``@njit`` twin of :func:`_evolve_numpy` (lazy, cached)."""
+
+    @nb.njit(cache=True)
+    def evolve(re, im, ph_re, ph_im, cos_betas, sin_betas, n_qubits):
+        p = ph_re.shape[0]
+        dim = re.shape[0]
+        for layer in range(p):
+            pr = ph_re[layer]
+            pi = ph_im[layer]
+            for j in range(dim):
+                x = re[j]
+                y = im[j]
+                re[j] = x * pr[j] - y * pi[j]
+                im[j] = x * pi[j] + y * pr[j]
+            c = cos_betas[layer]
+            s = sin_betas[layer]
+            for i in range(n_qubits):
+                bit = 1 << i
+                stride = bit << 1
+                for base in range(0, dim, stride):
+                    for r in range(bit):
+                        j = base + r
+                        k = j + bit
+                        ar = re[j]
+                        ai = im[j]
+                        br = re[k]
+                        bi = im[k]
+                        re[j] = c * ar + s * bi
+                        im[j] = c * ai - s * br
+                        re[k] = c * br + s * ai
+                        im[k] = c * bi - s * ar
+        return re, im
+
+    return evolve
+
+
+_JIT_EVOLVE = None
+
+
+def _get_jit_evolve():
+    """Build (once) and return the numba twin of :func:`_evolve_numpy`.
+
+    Imports numba lazily through :func:`qubic._accel.require_numba`, which
+    raises a helpful ImportError when the optional dependency is missing.
+    """
+    global _JIT_EVOLVE
+    if _JIT_EVOLVE is None:
+        _JIT_EVOLVE = _build_jit_evolve(require_numba())
+    return _JIT_EVOLVE
+
+
+def _layer_factors(gammas, betas, diag):
+    """Per-layer analytic gate factors (computed with NumPy for BOTH twins).
+
+    Cost layer l: exp(-i gamma_l diag) = (ph_re[l], ph_im[l]) elementwise,
+    computed via ``np.exp(-1j * gamma_l * diag)`` (bitwise the same phase the
+    ``scipy.expm`` reference path applies).
+    Mixer layer l: cos(beta_l) I - i sin(beta_l) X_i given as (cos_b[l], sin_b[l]).
+    """
+    p = gammas.size
+    dim = diag.size
+    ph_re = np.empty((p, dim), dtype=np.float64)
+    ph_im = np.empty((p, dim), dtype=np.float64)
+    for layer in range(p):
+        z = np.exp(-1j * gammas[layer] * diag)
+        ph_re[layer] = z.real
+        ph_im[layer] = z.imag
+    cos_b = np.cos(betas)
+    sin_b = np.sin(betas)
+    return ph_re, ph_im, cos_b, sin_b
+
+
+def final_state(gammas, betas, diag, use_jit=False):
+    """QAOA statevector after p = len(gammas) layers (analytic gate application).
+
+    Cost evolution e^{-i gamma H_C} is an exact per-amplitude phase; the mixer
+    e^{-i beta H_M} = prod_i e^{-i beta X_i} is applied as analytic two-level
+    rotations ``cos(beta) I - i sin(beta) X_i`` directly on the statevector.
+
+    Parameters
+    ----------
+    gammas, betas : sequence of float
+        QAOA cost/mixer angles, one pair per layer.
+    diag : np.ndarray
+        Diagonal of the cost Hamiltonian (length 2**n).
+    use_jit : bool, optional
+        When True, run the numba ``@njit`` twin of the state-evolution inner
+        loop (requires the optional ``numba`` dependency). The default runs
+        the pure-NumPy twin and never imports numba.
+
+    Returns
+    -------
+    np.ndarray
+        Complex statevector of length 2**n.
+    """
+    diag = np.asarray(diag, dtype=np.float64)
+    gammas = np.asarray(gammas, dtype=np.float64)
+    betas = np.asarray(betas, dtype=np.float64)
+    n = int(np.log2(diag.size))
+    dim = diag.size
+
+    ph_re, ph_im, cos_b, sin_b = _layer_factors(gammas, betas, diag)
+
+    re = np.full(dim, 1.0 / np.sqrt(dim), dtype=np.float64)   # |+>^{xn}
+    im = np.zeros(dim, dtype=np.float64)
+
+    if use_jit:
+        _get_jit_evolve()(re, im, ph_re, ph_im, cos_b, sin_b, n)
+    else:
+        _evolve_numpy(re, im, ph_re, ph_im, cos_b, sin_b, n)
+    return re + 1j * im
+
+
+def final_state_expm(gammas, betas, diag):
+    """Reference QAOA statevector using ``scipy.linalg.expm`` (legacy path).
+
+    Kept for validation (parity tests) and benchmarking; the production path
+    is :func:`final_state` (analytic gate application). Behavior is identical
+    to the pre-analytic implementation.
     """
     scipy_linalg = base.require("scipy.linalg", "scipy")
     expm = scipy_linalg.expm
@@ -109,11 +278,15 @@ def final_state(gammas, betas, diag):
     return psi
 
 
-def qaoa_expectation(gamma_beta, diag, p):
-    """<psi(gamma,beta)|H_C|psi(gamma,beta)> for QAOA parameters (2p,)."""
+def qaoa_expectation(gamma_beta, diag, p, use_jit=False):
+    """<psi(gamma,beta)|H_C|psi(gamma,beta)> for QAOA parameters (2p,).
+
+    ``use_jit`` selects the numba twin of the state-evolution inner loop
+    (see :func:`final_state`).
+    """
     gammas = gamma_beta[:p]
     betas = gamma_beta[p:]
-    psi = final_state(gammas, betas, diag)
+    psi = final_state(gammas, betas, diag, use_jit=use_jit)
     probs = np.abs(psi) ** 2
     return float(probs @ diag)
 
@@ -130,7 +303,8 @@ def sample_qaoa_state(psi, n_shots=1024, rng=None):
             for idx in indices]
 
 
-def solve_qaoa(Q, q, var_map, p=2, max_iter=100, n_shots=1024, seed=0):
+def solve_qaoa(Q, q, var_map, p=2, max_iter=100, n_shots=1024, seed=0,
+               use_jit=False):
     """Solve a QUBO problem using QAOA (ported; corrected Ising mapping).
 
     Parameters
@@ -147,6 +321,10 @@ def solve_qaoa(Q, q, var_map, p=2, max_iter=100, n_shots=1024, seed=0):
         Number of measurement shots.
     seed : int or None
         Seed for parameter init and sampling (reproducibility).
+    use_jit : bool, optional
+        When True, accelerate the state-evolution inner loop with the
+        optional numba ``@njit`` twin. The default (False) uses the pure
+        NumPy analytic path and never imports numba.
 
     Returns
     -------
@@ -179,7 +357,7 @@ def solve_qaoa(Q, q, var_map, p=2, max_iter=100, n_shots=1024, seed=0):
 
     # Optimize QAOA parameters
     result = optimize(
-        lambda x: qaoa_expectation(x, diag, p),
+        lambda x: qaoa_expectation(x, diag, p, use_jit=use_jit),
         x0=rng.uniform(0, np.pi, 2 * p),
         method="COBYLA",
         options={"maxiter": max_iter, "disp": False},
@@ -189,9 +367,8 @@ def solve_qaoa(Q, q, var_map, p=2, max_iter=100, n_shots=1024, seed=0):
     betas = result.x[p:]
 
     # Reconstruct final state with optimal parameters and sample candidates
-    psi = final_state(gammas, betas, diag)
+    psi = final_state(gammas, betas, diag, use_jit=use_jit)
     samples = sample_qaoa_state(psi, n_shots=n_shots, rng=rng)
-
     best_energy = float("inf")
     best_sample = None
     candidates = []
@@ -232,11 +409,13 @@ def solve_qaoa(Q, q, var_map, p=2, max_iter=100, n_shots=1024, seed=0):
     }
 
 
-def solve(Q, q, var_map, k_max=15, top_k=20, time_limit=None, **kwargs):
+def solve(Q, q, var_map, k_max=15, top_k=20, time_limit=None, use_jit=False,
+          **kwargs):
     """Unified solver entry point (see :mod:`qubic.solvers.base`).
 
     Extra kwargs: ``p`` (QAOA depth), ``max_iter`` (COBYLA iterations),
-    ``n_shots``, ``seed``. ``time_limit`` and ``k_max`` are accepted for
+    ``n_shots``, ``seed``, ``use_jit`` (numba twin for the state-evolution
+    inner loop). ``time_limit`` and ``k_max`` are accepted for
     interface uniformity (QAOA is budgeted by ``max_iter``/``n_shots`` and is
     unconstrained — cardinality is encoded in the QUBO penalties).
 
@@ -249,6 +428,6 @@ def solve(Q, q, var_map, k_max=15, top_k=20, time_limit=None, **kwargs):
     base.reject_unknown_kwargs("qaoa.solve", kwargs)
 
     result = solve_qaoa(Q, q, var_map, p=p, max_iter=max_iter,
-                        n_shots=n_shots, seed=seed)
+                        n_shots=n_shots, seed=seed, use_jit=use_jit)
     solutions = base.finalize((s for s, _ in result["candidates"]), Q, q, top_k)
     return solutions, result["wall_time_s"], None

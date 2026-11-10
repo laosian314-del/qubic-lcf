@@ -189,12 +189,16 @@ class Problem:
 
     # -- QUBO layer (lazy + memoized) -------------------------------------
 
-    def _get_qubo(self, encoding, lambdas):
+    def _get_qubo(self, encoding, lambdas, use_jit=False):
         """Build (or reuse) the QUBO for this problem.
 
         Returns ``(Q, q, var_map, decode)``.  Memoized on the problem so a
         second QUBO-backed solver with the same (encoding, penalties) never
         rebuilds it; alternative-backend solvers never call this at all.
+        ``use_jit`` selects the optional numba assembly kernel (see
+        :mod:`qubic.qubo`) only when a build actually happens -- the two
+        paths produce bitwise-identical QUBOs, so the memo key does not
+        depend on it.
         """
         from . import qubo as qubo_layer
 
@@ -204,12 +208,12 @@ class Problem:
         key = (encoding, k, tuple(sorted(lam.items())))
         if key not in self._qubo_memo:
             self._qubo_memo[key] = qubo_layer.build_qubo(
-                encoding, self._Aw, self._yw, k, **lam)
+                encoding, self._Aw, self._yw, k, use_jit=use_jit, **lam)
         return self._qubo_memo[key]
 
     # -- dispatch ----------------------------------------------------------
 
-    def solve(self, solver, top_k=10):
+    def solve(self, solver, top_k=10, use_jit=False):
         """Run ``solver`` on this problem and return a :class:`Result`.
 
         ``solver`` is a solver object bundling its own settings, e.g.
@@ -217,6 +221,12 @@ class Problem:
         or ``qubic.OMP()``.  ``top_k`` caps the number of refined QUBO
         candidates kept in ``Result.top_K`` (ignored by the alternative
         backend, which has a single candidate).
+
+        ``use_jit`` (default ``False``) opts into the optional numba
+        acceleration of the whole run: the QUBO assembly, the solver's own
+        kernel where one exists (SA/Tabu/QAOA) and the NNLS refinement.
+        The default path never imports numba ("don't pay for what you don't
+        use").  The numba/JIT acceleration was NOT used in the article.
         """
         from .solver import Solver
 
@@ -228,4 +238,4 @@ class Problem:
             )
         if not isinstance(top_k, (int, np.integer)) or top_k < 1:
             raise ValueError(f"top_k must be a positive int; got {top_k!r}")
-        return solver._run(self, int(top_k))
+        return solver._run(self, int(top_k), use_jit=bool(use_jit))
