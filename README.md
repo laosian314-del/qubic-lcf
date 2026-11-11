@@ -224,7 +224,7 @@ registry) remain available in the submodules for advanced use.
 ## Pyfitit integration
 
 **QUBIC** can be used as a drop-in mixture-search backend for
-[PyFitit](https://github.com/rapodem/pyfitit)-style workflows: the module
+[PyFitit](https://github.com/gudasergey/pyFitIt)-style workflows: the module
 `qubic.pyfitit_api` exposes `tryallmixtures`, which mirrors
 `pyfitit.mixture.tryallmixtures` but enumerates candidate mixtures with the
 **QUBIC** pipeline instead of the built-in search.
@@ -320,7 +320,7 @@ python benchmarks/bench_qubo_build.py   # default vs use_jit timings
 
 ## Links
 
-- PyFitit: https://github.com/rapodem/pyfitit
+- PyFitit: https://github.com/gudasergey/pyFitIt
 - Pyfitit article: A. Martini, S. A. Guda, A. A. Guda, G. Yu. Smolentsev,
   A. Algasov, O. Usoltsev et al., "PyFitit: The software for quantitative
   analysis of XANES spectra using machine-learning algorithms",
