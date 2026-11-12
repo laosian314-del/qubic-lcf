@@ -40,8 +40,14 @@ def _make_pulp_solver(msg, time_limit, backend="auto"):
         if backend == "cbc" or solver.available():
             return solver
     solver = pulp.HiGHS_CMD(msg=msg, timeLimit=tl)
-    if backend == "highs" or solver.available():
+    if solver.available():
         return solver
+    if backend == "highs":
+        raise ImportError(
+            "solver_backend='highs' requested, but the 'highs' executable "
+            "is not available to PuLP (pulp.HiGHS_CMD); install HiGHS or "
+            "use solver_backend='auto'/'cbc'"
+        )
     raise ImportError(
         "no PuLP solver backend available (CBC and HiGHS both missing); "
         "install it with: pip install pulp"

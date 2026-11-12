@@ -117,7 +117,18 @@ def test_available_solvers_lists_installed():
     avail = available_solvers()
     assert isinstance(avail, list)
     assert set(avail) <= SOLVER_NAMES
-    assert "milp" in avail and "cp_sat" in avail and "qaoa" in avail
+    # milp (pulp) and qaoa (scipy) are installed in every CI environment
+    assert "milp" in avail and "qaoa" in avail
+    # a solver is listed iff its optional deps are importable (gpu_sa
+    # additionally needs a CUDA device)
+    deps = {"milp": ("pulp",), "highs": ("pulp",), "cp_sat": ("ortools",),
+            "scip": ("pyscipopt",), "sa": ("dimod",),
+            "tabu": ("dwave.samplers", "dimod"), "sqaod": ("sqaod",),
+            "qaoa": ("scipy",)}
+    for name, mods in deps.items():
+        assert (name in avail) == all(_has(m) for m in mods)
+    if "gpu_sa" in avail:
+        assert _has("torch") and _cuda_available()
 
 
 def test_unknown_solver_raises():
@@ -150,10 +161,23 @@ def test_milp_top_k_respected():
 
 @NEED_PULP
 def test_milp_highs_backend():
+    import pulp
+    if not pulp.HiGHS_CMD(msg=False).available():
+        pytest.skip("HiGHS executable not available to PuLP")
     Q, q, var_map = make_qubo(seed=11)
     solutions, _, _ = solve("milp", Q, q, var_map, k_max=2, top_k=4,
                             time_limit=30, solver_backend="highs")
     check_solutions(solutions, Q, q, var_map, 2, 4)
+
+
+@NEED_PULP
+def test_milp_highs_unavailable_raises(monkeypatch):
+    import pulp
+    Q, q, var_map = make_qubo(seed=12)
+    monkeypatch.setattr(pulp.HiGHS_CMD, "available", lambda self: False)
+    with pytest.raises(ImportError, match="highs"):
+        solve("milp", Q, q, var_map, k_max=2, top_k=2,
+              time_limit=30, solver_backend="highs")
 
 
 # ---------------------------------------------------------------------------

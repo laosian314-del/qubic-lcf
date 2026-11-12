@@ -27,6 +27,7 @@ def _problem(seed=0, m=60, n=10, k=2, noise=0.01):
 
 
 def test_omp_use_jit_parity():
+    pytest.importorskip("numba")
     task, _ = _problem()
     r0 = task.solve(qubic.OMP(), use_jit=False)
     r1 = task.solve(qubic.OMP(), use_jit=True)
@@ -36,6 +37,7 @@ def test_omp_use_jit_parity():
 
 
 def test_mp_use_jit_parity():
+    pytest.importorskip("numba")
     task, _ = _problem(seed=1)
     r0 = task.solve(qubic.MP(), use_jit=False)
     r1 = task.solve(qubic.MP(), use_jit=True)
@@ -43,6 +45,7 @@ def test_mp_use_jit_parity():
 
 
 def test_sa_native_kernel_without_dimod():
+    pytest.importorskip("numba")
     # use_jit=True switches SA to the native numba kernel, which must work
     # without the optional dimod package.
     task, _ = _problem(seed=2)
@@ -52,6 +55,7 @@ def test_sa_native_kernel_without_dimod():
 
 
 def test_tabu_native_kernel_without_dimod():
+    pytest.importorskip("numba")
     task, _ = _problem(seed=3)
     res = task.solve(qubic.Tabu(), use_jit=True)
     assert isinstance(res.selected, tuple) and len(res.selected) >= 1
@@ -59,6 +63,7 @@ def test_tabu_native_kernel_without_dimod():
 
 def test_milp_use_jit_parity():
     pytest.importorskip("pulp")
+    pytest.importorskip("numba")
     task, _ = _problem(seed=4)
     r0 = task.solve(qubic.MILP(time_limit=10.0), use_jit=False)
     r1 = task.solve(qubic.MILP(time_limit=10.0), use_jit=True)
@@ -67,6 +72,7 @@ def test_milp_use_jit_parity():
 
 def test_use_jit_qaoa_parity():
     pytest.importorskip("scipy")
+    pytest.importorskip("numba")
     # linked_B2 uses 3 binary variables per component and QAOA is capped at
     # MAX_QUBITS=15 -> at most 5 components here.
     task, _ = _problem(seed=5, n=5)
